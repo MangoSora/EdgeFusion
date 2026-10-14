@@ -667,7 +667,15 @@ int rtsp_server_client_count(void)
     return n;
 }
 
+int rtsp_server_slow_count(void)
+{
+    return atomic_load(&g_slow_evicted);
+}
 
+int rtsp_server_max_queued_kb(void)
+{
+    return atomic_load(&g_max_queued_kb);
+}
 
 void rtsp_server_deinit(void)
 {

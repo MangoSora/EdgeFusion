@@ -12,11 +12,15 @@
 int  rtsp_server_init(int port, const AVCodecParameters *codecpar);
 void rtsp_server_deinit(void);
 
-/* stream_receiver 每收到一个视频包调用：切 NALU → 打包 RTP → 扇出给所有客户端。
- * 非阻塞发送，慢客户端丢帧不影响录像主线。 */
+/* stream_receiver 每收到一个视频包调用：切 NALU → 打包 RTP → 放入各客户端发送队列。
+ * 锁内不做 socket I/O：慢客户端只会让它自己的队列溢出，不阻塞推流与状态查询。 */
 void rtsp_server_on_packet(const AVPacket *pkt, const AVRational *time_base);
 
 /* 当前正在拉流的 RTSP 预览客户端数 */
 int  rtsp_server_client_count(void);
+
+/* 运行统计：累计踢出的慢客户端数、观测到的最大单客户端积压(KB) */
+int  rtsp_server_slow_count(void);
+int  rtsp_server_max_queued_kb(void);
 
 #endif

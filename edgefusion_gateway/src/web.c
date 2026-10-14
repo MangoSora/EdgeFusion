@@ -270,7 +270,8 @@ static void serve_status(int cfd)
 
     /* rtsp_server */
     off += snprintf(json + off, sizeof(json) - off,
-        ",\"rtsp_server\":{\"clients\":%d}", rtsp_clients);
+        ",\"rtsp_server\":{\"clients\":%d,\"slow_clients\":%d,\"max_queued_kb\":%d}",
+        rtsp_clients, rtsp_server_slow_count(), rtsp_server_max_queued_kb());
 
     /* cloud_ai */
     off += snprintf(json + off, sizeof(json) - off,
