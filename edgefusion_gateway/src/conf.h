@@ -64,6 +64,7 @@ typedef struct {
     int   mqtt_port;
     char  mqtt_client_id[64];
     char  mqtt_topic[128];
+    char  mqtt_prefix[128];   /* 端侧主题前缀，例 edgefusion/device */
     char  mqtt_user[64];
     char  mqtt_pass[64];
 

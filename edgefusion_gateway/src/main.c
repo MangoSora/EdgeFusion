@@ -2,6 +2,7 @@
 #include "log.h"
 #include "stream_receiver.h"
 #include "event_bus.h"
+#include "mqtt_bridge.h"
 #include "cloud_ai.h"
 #include "alarm.h"
 #include "web.h"
@@ -148,6 +149,16 @@ int main(int argc, char *argv[])
         LOG_WRN("cloud_ai 启动失败（检测不可用，不影响录像/预览）");
     }
 
+    /* 启动 MQTT 桥接（云-边-端：接收端侧状态/事件/快照，并可下发命令） */
+    if (cfg.mqtt_enable) {
+        if (mqtt_bridge_init(cfg.mqtt_host, cfg.mqtt_port, cfg.mqtt_client_id,
+                             cfg.mqtt_prefix, "data/remote") != 0) {
+            LOG_WRN("mqtt_bridge 启动失败（端侧接入不可用，不影响录像/预览）");
+        }
+    } else {
+        LOG_INF("MQTT 桥接未启用（mqtt_enable=0）");
+    }
+
     /* 启动 Web 管理界面 */
     if (web_start(&cfg) != 0) {
         LOG_WRN("Web 模块启动失败（不影响录像）");
@@ -162,6 +173,7 @@ int main(int argc, char *argv[])
     }
 
     LOG_INF("收到退出信号，正在停止...");
+    mqtt_bridge_deinit();
     web_stop();
     cloud_ai_stop();
     stream_receiver_stop();

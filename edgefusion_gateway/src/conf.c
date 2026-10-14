@@ -82,6 +82,7 @@ int conf_load(gateway_conf_t *cfg, const char *path)
     cfg->mqtt_port = 1883;
     strcpy(cfg->mqtt_client_id, "edgefusion_gateway_imx6ull");
     strcpy(cfg->mqtt_topic, "edgefusion/events");
+    strcpy(cfg->mqtt_prefix, "edgefusion/device");
     strcpy(cfg->log_level, "info");
 
     FILE *fp = fopen(path, "r");
@@ -147,6 +148,7 @@ int conf_load(gateway_conf_t *cfg, const char *path)
         else if (!strcmp(key, "mqtt_port"))           cfg->mqtt_port = atoi(val);
         else if (!strcmp(key, "mqtt_client_id"))      set_str(cfg->mqtt_client_id, sizeof(cfg->mqtt_client_id), val);
         else if (!strcmp(key, "mqtt_topic"))          set_str(cfg->mqtt_topic, sizeof(cfg->mqtt_topic), val);
+        else if (!strcmp(key, "mqtt_prefix"))         set_str(cfg->mqtt_prefix, sizeof(cfg->mqtt_prefix), val);
         else if (!strcmp(key, "mqtt_user"))           set_str(cfg->mqtt_user, sizeof(cfg->mqtt_user), val);
         else if (!strcmp(key, "mqtt_pass"))           set_str(cfg->mqtt_pass, sizeof(cfg->mqtt_pass), val);
         else if (!strcmp(key, "log_level"))           set_str(cfg->log_level, sizeof(cfg->log_level), val);
@@ -210,7 +212,8 @@ void conf_dump(const gateway_conf_t *cfg)
     LOG_INF("云端Token     : %s", cfg->anthropic_auth_token[0] ? "(已设置)" : "(未设置)");
     LOG_INF("报警 GPIO LED : %d, 蜂鸣器: %d", cfg->alarm_gpio_led, cfg->alarm_gpio_buzzer);
     LOG_INF("Web           : %s:%d", cfg->web_bind, cfg->web_port);
-    LOG_INF("MQTT          : %s (enable=%d)", cfg->mqtt_host, cfg->mqtt_enable);
+    LOG_INF("MQTT          : %s:%d (enable=%d, prefix=%s)",
+            cfg->mqtt_host, cfg->mqtt_port, cfg->mqtt_enable, cfg->mqtt_prefix);
     LOG_INF("日志          : level=%s file=%s", cfg->log_level, cfg->log_file);
 }
 
@@ -262,6 +265,7 @@ static int format_value(const gateway_conf_t *cfg, const char *key, char *out, s
     else if (!strcmp(key, "mqtt_port"))           { snprintf(out, cap, "%d", cfg->mqtt_port); return 1; }
     else if (!strcmp(key, "mqtt_client_id"))      { snprintf(out, cap, "%s", cfg->mqtt_client_id); return 1; }
     else if (!strcmp(key, "mqtt_topic"))          { snprintf(out, cap, "%s", cfg->mqtt_topic); return 1; }
+    else if (!strcmp(key, "mqtt_prefix"))         { snprintf(out, cap, "%s", cfg->mqtt_prefix); return 1; }
     else if (!strcmp(key, "mqtt_user"))           { snprintf(out, cap, "%s", cfg->mqtt_user); return 1; }
     else if (!strcmp(key, "mqtt_pass"))           { snprintf(out, cap, "%s", cfg->mqtt_pass); return 1; }
     else if (!strcmp(key, "log_level"))           { snprintf(out, cap, "%s", cfg->log_level); return 1; }
