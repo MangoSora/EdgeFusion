@@ -49,6 +49,12 @@ int conf_load(gateway_conf_t *cfg, const char *path)
     memset(cfg, 0, sizeof(*cfg));
 
     /* 默认值 */
+    strcpy(cfg->source_type, "rtsp");
+    strcpy(cfg->video_device, "/dev/video11");
+    cfg->capture_width = 640;
+    cfg->capture_height = 480;
+    cfg->capture_fps = 30;
+    cfg->video_bitrate_kbps = 1500;
     cfg->rtsp_reconnect_s = 3;
     cfg->rtsp_timeout_us  = 5000000;
     strcpy(cfg->rtsp_transport, "tcp");
@@ -99,7 +105,13 @@ int conf_load(gateway_conf_t *cfg, const char *path)
         char *val = trim(eq + 1);
         if (!*key) continue;
 
-        if      (!strcmp(key, "rtsp_url"))            set_str(cfg->rtsp_url, sizeof(cfg->rtsp_url), val);
+        if      (!strcmp(key, "source_type")) set_str(cfg->source_type, sizeof(cfg->source_type), val);
+        else if (!strcmp(key, "video_device")) set_str(cfg->video_device, sizeof(cfg->video_device), val);
+        else if (!strcmp(key, "capture_width")) cfg->capture_width = atoi(val);
+        else if (!strcmp(key, "capture_height")) cfg->capture_height = atoi(val);
+        else if (!strcmp(key, "capture_fps")) cfg->capture_fps = atoi(val);
+        else if (!strcmp(key, "video_bitrate_kbps")) cfg->video_bitrate_kbps = atoi(val);
+        else if (!strcmp(key, "rtsp_url"))            set_str(cfg->rtsp_url, sizeof(cfg->rtsp_url), val);
         else if (!strcmp(key, "rtsp_sub_url"))        set_str(cfg->rtsp_sub_url, sizeof(cfg->rtsp_sub_url), val);
         else if (!strcmp(key, "rtsp_timeout_us"))     cfg->rtsp_timeout_us = strtol(val, NULL, 10);
         else if (!strcmp(key, "rtsp_transport"))      set_str(cfg->rtsp_transport, sizeof(cfg->rtsp_transport), val);
@@ -142,6 +154,25 @@ int conf_load(gateway_conf_t *cfg, const char *path)
         /* 未知 key 静默忽略 */
     }
     fclose(fp);
+    if (strcmp(cfg->source_type, "rtsp") && strcmp(cfg->source_type, "v4l2")) {
+        LOG_ERR("source_type must be rtsp or v4l2");
+        return -1;
+    }
+    if (!strcmp(cfg->source_type, "v4l2") &&
+        (!cfg->video_device[0] || cfg->capture_width < 16 || cfg->capture_width > 4096 ||
+         cfg->capture_height < 16 || cfg->capture_height > 2160 ||
+         (cfg->capture_width & 1) || (cfg->capture_height & 1) ||
+         cfg->capture_fps < 1 || cfg->capture_fps > 120 ||
+         cfg->video_bitrate_kbps < 100 || cfg->video_bitrate_kbps > 50000)) {
+        LOG_ERR("Invalid USB capture dimensions, fps or bitrate");
+        return -1;
+    }
+    if (cfg->rtsp_reconnect_s < 1 || cfg->rtsp_reconnect_s > 60 ||
+        cfg->rtsp_timeout_us < 100000 || cfg->rtsp_timeout_us > 60000000 ||
+        cfg->segment_seconds < 1) {
+        LOG_ERR("Invalid reconnect interval, input timeout or segment duration");
+        return -1;
+    }
     return 0;
 }
 
@@ -164,6 +195,9 @@ void conf_apply_log(const gateway_conf_t *cfg)
 void conf_dump(const gateway_conf_t *cfg)
 {
     LOG_INF("==== 配置摘要 ====");
+    LOG_INF("Input: %s; USB: %s %dx%d@%d MJPEG -> libx264 %d kbps",
+            cfg->source_type, cfg->video_device, cfg->capture_width,
+            cfg->capture_height, cfg->capture_fps, cfg->video_bitrate_kbps);
     LOG_INF("RTSP 主码流   : %s", cfg->rtsp_url);
     LOG_INF("RTSP 子码流   : %s", cfg->rtsp_sub_url[0] ? cfg->rtsp_sub_url : "(空,用主码流降采样)");
     LOG_INF("RTSP 预览转发 : %s (端口 %d)", cfg->rtsp_server_enable ? "开" : "关", cfg->rtsp_server_port);
@@ -186,7 +220,13 @@ void conf_dump(const gateway_conf_t *cfg)
  * 注意：敏感字段(anthropic_auth_token/mqtt_pass/mqtt_user)不在此处理(写回=原值,安全,但不在白名单) */
 static int format_value(const gateway_conf_t *cfg, const char *key, char *out, size_t cap)
 {
-    if      (!strcmp(key, "rtsp_url"))            { snprintf(out, cap, "%s", cfg->rtsp_url); return 1; }
+    if      (!strcmp(key, "source_type")) { snprintf(out, cap, "%s", cfg->source_type); return 1; }
+    else if (!strcmp(key, "video_device")) { snprintf(out, cap, "%s", cfg->video_device); return 1; }
+    else if (!strcmp(key, "capture_width")) { snprintf(out, cap, "%d", cfg->capture_width); return 1; }
+    else if (!strcmp(key, "capture_height")) { snprintf(out, cap, "%d", cfg->capture_height); return 1; }
+    else if (!strcmp(key, "capture_fps")) { snprintf(out, cap, "%d", cfg->capture_fps); return 1; }
+    else if (!strcmp(key, "video_bitrate_kbps")) { snprintf(out, cap, "%d", cfg->video_bitrate_kbps); return 1; }
+    else if (!strcmp(key, "rtsp_url"))            { snprintf(out, cap, "%s", cfg->rtsp_url); return 1; }
     else if (!strcmp(key, "rtsp_sub_url"))        { snprintf(out, cap, "%s", cfg->rtsp_sub_url[0] ? cfg->rtsp_sub_url : ""); return 1; }
     else if (!strcmp(key, "rtsp_timeout_us"))     { snprintf(out, cap, "%ld", cfg->rtsp_timeout_us); return 1; }
     else if (!strcmp(key, "rtsp_transport"))      { snprintf(out, cap, "%s", cfg->rtsp_transport); return 1; }

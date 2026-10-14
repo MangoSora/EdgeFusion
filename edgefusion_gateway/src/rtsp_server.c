@@ -9,6 +9,9 @@
 #include <fcntl.h>
 #include <netinet/in.h>
 #include <pthread.h>
+#include <poll.h>
+#include <stdatomic.h>
+#include <sys/time.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -165,7 +168,7 @@ static client_t      *g_clients = NULL;
 static pthread_mutex_t g_mtx = PTHREAD_MUTEX_INITIALIZER;
 static int            g_listen_fd = -1;
 static pthread_t      g_tid;
-static volatile int   g_running = 0;
+static atomic_int   g_running = 0;
 static char           g_sdp[1024];
 static int            g_sdp_len;
 
@@ -368,6 +371,8 @@ static void handle_client(int cfd, struct sockaddr_in *caddr)
     int fl = fcntl(cfd, F_GETFL, 0);
     if (fl >= 0) fcntl(cfd, F_SETFL, fl & ~O_NONBLOCK);
 
+    struct timeval send_timeout = {.tv_sec = 2};
+    setsockopt(cfd, SOL_SOCKET, SO_SNDTIMEO, &send_timeout, sizeof(send_timeout));
     client_t *c = calloc(1, sizeof(client_t));
     if (!c) { close(cfd); return; }
     c->fd = cfd;
@@ -379,6 +384,11 @@ static void handle_client(int cfd, struct sockaddr_in *caddr)
     char buf[4096];
     while (g_running) {
         /* 读一行请求（简化：一次读整段，按 \r\n\r\n 分） */
+        /* Recheck stop even if a client sends no more RTSP commands. */
+        struct pollfd pfd = {.fd = cfd, .events = POLLIN};
+        int ready = poll(&pfd, 1, 200);
+        if (!ready || (ready < 0 && errno == EINTR)) continue;
+        if (ready < 0 || (pfd.revents & (POLLERR | POLLHUP | POLLNVAL))) break;
         ssize_t n = recv(cfd, buf, sizeof(buf) - 1, 0);
         if (n <= 0) break;
         buf[n] = 0;

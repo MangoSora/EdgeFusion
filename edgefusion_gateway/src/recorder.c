@@ -18,6 +18,7 @@ struct recorder {
     AVFormatContext *ofmt;         /* 当前输出上下文 */
     AVStream        *ost;          /* 输出视频流 */
     char             cur_path[512];/* 当前段文件路径 */
+    int64_t          segment_dts; /* Input timestamp origin, reset at each segment. */
     int              seg_index;    /* 段序号 */
     double           seg_start_ts; /* 当前段起始时间戳(秒) */
     int              header_written;
@@ -30,14 +31,16 @@ struct recorder {
 /* 按段序号生成文件名：prefix_YYYYmmdd_HHMMSS_NN.mp4 */
 static void make_path(recorder_t *r, char *out, size_t n)
 {
-    time_t t = time(NULL);
+    struct timespec stamp;
+    clock_gettime(CLOCK_REALTIME, &stamp);
+    time_t t = stamp.tv_sec;
     struct tm tm;
     localtime_r(&t, &tm);
-    snprintf(out, n, "%s/%s_%04d%02d%02d_%02d%02d%02d_%02d.mp4",
+    snprintf(out, n, "%s/%s_%04d%02d%02d_%02d%02d%02d_%09ld_%d.mp4",
              r->cfg.dir, r->cfg.prefix,
              tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
              tm.tm_hour, tm.tm_min, tm.tm_sec,
-             r->seg_index % 100);
+             stamp.tv_nsec, r->seg_index);
 }
 
 /* 关闭当前段 */
@@ -45,8 +48,11 @@ static void close_segment(recorder_t *r)
 {
     if (!r->ofmt) return;
     if (r->header_written) {
-        if (av_write_trailer(r->ofmt) != 0)
-            LOG_WRN("av_write_trailer 失败: %s", r->cur_path);
+        int ret = av_write_trailer(r->ofmt);
+        if (ret < 0) {
+            char err[128]; av_strerror(ret, err, sizeof(err));
+            LOG_WRN("av_write_trailer failed: %s (%s, ret=%d)", r->cur_path, err, ret);
+        }
     }
     if (!(r->ofmt->oformat->flags & AVFMT_NOFILE))
         avio_closep(&r->ofmt->pb);
@@ -60,7 +66,6 @@ static void close_segment(recorder_t *r)
 /* 打开新段 */
 static int open_segment(recorder_t *r)
 {
-    snprintf(r->cfg.dir, 0, "%s", r->cfg.dir); /* no-op, keep dir */
     /* 确保目录存在 */
     mkdir(r->cfg.dir, 0755);
 
@@ -178,7 +183,8 @@ int recorder_get_status(const recorder_t *r, recorder_status_t *st)
     st->seg_index = r->seg_index;
     /* cur_segment 取 basename */
     const char *base = strrchr(r->cur_path, '/');
-    snprintf(st->cur_segment, sizeof(st->cur_segment), "%s", base ? base + 1 : r->cur_path);
+    snprintf(st->cur_segment, sizeof(st->cur_segment), "%.*s",
+             (int)sizeof(st->cur_segment) - 1, base ? base + 1 : r->cur_path);
     long bytes = r->bytes_written;
     time_t start = r->seg_start_wall;
     pthread_mutex_unlock((pthread_mutex_t *)&r->mtx);
@@ -198,9 +204,15 @@ void recorder_set_segment_seconds(recorder_t *r, int seconds)
     LOG_INF("分段时长热更新为 %d 秒(下一段生效)", seconds);
 }
 
-int recorder_write_packet(recorder_t *r, AVPacket *pkt, int is_key, double ts)
+int recorder_write_packet(recorder_t *r, AVPacket *pkt, int is_key, AVRational source_time_base)
 {
-    if (!r) return -1;
+    if (!r || source_time_base.num <= 0 || source_time_base.den <= 0) return -1;
+    int64_t input_dts = pkt->dts != AV_NOPTS_VALUE ? pkt->dts : pkt->pts;
+    if (input_dts == AV_NOPTS_VALUE) {
+        LOG_WRN("Cannot record packet without PTS/DTS");
+        return -1;
+    }
+    double ts = input_dts * av_q2d(source_time_base);
 
     /* 需要关键帧才开始/切换段，避免 MP4 损坏 */
     if (r->waiting_key) {
@@ -209,6 +221,7 @@ int recorder_write_packet(recorder_t *r, AVPacket *pkt, int is_key, double ts)
         if (!r->ofmt) {
             if (open_segment(r) != 0) return -1;
             r->seg_start_ts = ts;
+            r->segment_dts = input_dts;
         }
         r->waiting_key = 0;
     }
@@ -219,17 +232,17 @@ int recorder_write_packet(recorder_t *r, AVPacket *pkt, int is_key, double ts)
         cleanup_disk(r);
         if (open_segment(r) != 0) return -1;
         r->seg_start_ts = ts;
+        r->segment_dts = input_dts;
         r->waiting_key = 0;
     }
 
     /* 写头（首帧，必须在有有效帧时写） */
     if (!r->header_written) {
-        /* 输出用源流时基 1/90000（RTSP H.264 标准时基），避免帧率信息缺失 */
-        r->ost->time_base = (AVRational){1, 90000};
-        /* fragment MP4：每关键帧切 fragment 随写随落盘，
-         * 断电/强杀也完整可播（监控录像标准做法，无需 write_trailer finalize）。
-         * empty_moov=初始化即写 ftyp+moov，frag_keyframe=关键帧切 frag，
-         * +dash 兼容默认 base moof 使时间戳正确。 */
+        /* Preserve the input time base; the muxer may adjust it in write_header. */
+        r->ost->time_base = source_time_base;
+        /* Fragmented MP4 reduces the amount at risk on interruption.
+         * It does NOT guarantee power-loss safety: OS/device caches and the
+         * incomplete final fragment can still lose data. */
         AVDictionary *opts = NULL;
         av_dict_set(&opts, "movflags", "+frag_keyframe+empty_moov+default_base_moof", 0);
         av_dict_set(&opts, "frag_duration", "10000000", 0); /* 10s 一个 fragment 兜底 */
@@ -245,13 +258,16 @@ int recorder_write_packet(recorder_t *r, AVPacket *pkt, int is_key, double ts)
     /* 重打时间戳到输出流时基 */
     AVPacket *out = av_packet_clone(pkt);
     if (!out) return -1;
-    av_packet_rescale_ts(out, (AVRational){1, 90000}, r->ost->time_base);
+    if (out->pts != AV_NOPTS_VALUE) out->pts -= r->segment_dts;
+    if (out->dts != AV_NOPTS_VALUE) out->dts -= r->segment_dts;
+    av_packet_rescale_ts(out, source_time_base, r->ost->time_base);
     out->stream_index = 0;
 
+    int packet_size = out->size; /* muxer consumes and clears the packet */
     int ret = av_interleaved_write_frame(r->ofmt, out);
     if (ret >= 0) {
         pthread_mutex_lock(&r->mtx);
-        r->bytes_written += out->size;
+        r->bytes_written += packet_size;
         pthread_mutex_unlock(&r->mtx);
     }
     av_packet_free(&out);

@@ -1,240 +1,216 @@
 #include "stream_receiver.h"
+#include "usb_source.h"
 #include "log.h"
 #include "frame_grabber.h"
 #include "rtsp_server.h"
 
-#include "libavcodec/avcodec.h"
-#include "libavformat/avformat.h"
-#include "libavutil/opt.h"
-#include "libavutil/time.h"
-
+#include <libavformat/avformat.h>
+#include <libavutil/time.h>
 #include <pthread.h>
-#include <stdlib.h>
+#include <stdatomic.h>
+#include <stdio.h>
 #include <string.h>
 #include <unistd.h>
 
-static pthread_t      g_tid;
-static volatile int   g_running = 0;
-static AVFormatContext *g_ic = NULL;
-static recorder_t     *g_rec = NULL;
-static int             g_fg_inited = 0;
-static int             g_rtsp_inited = 0;
+static pthread_t g_tid;
+static atomic_int g_running;
+static atomic_int g_segment_seconds;
+static gateway_conf_t g_cfg;
+static pthread_mutex_t g_status_lock = PTHREAD_MUTEX_INITIALIZER;
+static stream_status_t g_status;
 
-/* 打开 RTSP 输入。返回视频流索引，失败 -1 */
-static int open_input(const gateway_conf_t *cfg, AVFormatContext **pic, int *vstream_idx)
+/* Only the receiver thread touches FFmpeg/V4L2/recorder objects.
+ * Web reads a value snapshot, never a pointer that reconnect can free. */
+static void publish_status(const AVCodecParameters *cp, int fps, recorder_t *rec,
+                           unsigned long long frames, unsigned reconnects)
 {
-    AVFormatContext *ic = avformat_alloc_context();
-    if (!ic) { LOG_ERR("avformat_alloc_context 失败"); return -1; }
-
-    /* RTSP 选项：贴近板子 ffmpeg 命令行成功配置（仅 rtsp_transport），
-     * 探测窗口要够大以收到首个 IDR(SPS/PPS)——sample_rtsp 在线编码 + 默认 GOP，
-     * 首个关键帧来得比 smartIPC 晚，1s/512KB 收不够帧会报 "not enough frames
-     * to estimate rate" / "Could not find codec parameters"。放宽到 5s/10MB。 */
-    AVDictionary *opts = NULL;
-    av_dict_set(&opts, "rtsp_transport", cfg->rtsp_transport, 0);
-    av_dict_set(&opts, "analyzeduration", "5000000", 0);   /* 5s */
-    av_dict_set(&opts, "probesize",         "10485760", 0); /* 10MB */
-    av_dict_set(&opts, "fflags", "+discardcorrupt", 0);
-
-    int ret = avformat_open_input(&ic, cfg->rtsp_url, NULL, &opts);
-    av_dict_free(&opts);
-    if (ret < 0) {
-        char err[128] = {0};
-        av_strerror(ret, err, sizeof(err));
-        LOG_ERR("打开 RTSP 失败: %s (%s)", cfg->rtsp_url, err);
-        avformat_free_context(ic);
-        return -1;
-    }
-
-    ret = avformat_find_stream_info(ic, NULL);
-    if (ret < 0) {
-        LOG_ERR("find_stream_info 失败");
-        avformat_close_input(&ic);
-        return -1;
-    }
-
-    int idx = -1;
-    for (unsigned i = 0; i < ic->nb_streams; i++) {
-        if (ic->streams[i]->codecpar->codec_type == AVMEDIA_TYPE_VIDEO) {
-            idx = i;
-            break;
+    stream_status_t st = {0};
+    snprintf(st.source_type, sizeof(st.source_type), "%s", g_cfg.source_type);
+    st.connected = cp != NULL;
+    st.frames = frames;
+    st.reconnects = reconnects;
+    if (cp) { st.width = cp->width; st.height = cp->height; st.fps = fps; }
+    if (rec) {
+        recorder_status_t rs;
+        if (!recorder_get_status(rec, &rs)) {
+            st.recording = rs.recording;
+            st.bitrate_kbps = rs.bitrate_kbps;
+            snprintf(st.cur_segment, sizeof(st.cur_segment), "%s", rs.cur_segment);
         }
     }
-    if (idx < 0) {
-        LOG_ERR("未找到视频流");
-        avformat_close_input(&ic);
-        return -1;
-    }
-
-    AVCodecParameters *cp = ic->streams[idx]->codecpar;
-    LOG_INF("视频流: %s %dx%d %d/%d fps",
-            avcodec_get_name(cp->codec_id),
-            cp->width, cp->height,
-            ic->streams[idx]->avg_frame_rate.num,
-            ic->streams[idx]->avg_frame_rate.den);
-
-    *pic = ic;
-    *vstream_idx = idx;
-    return 0;
+    pthread_mutex_lock(&g_status_lock);
+    g_status = st;
+    pthread_mutex_unlock(&g_status_lock);
 }
+
+typedef struct { int64_t deadline; } input_deadline_t;
+static int interrupt_input(void *opaque)
+{
+    input_deadline_t *d = opaque;
+    return !atomic_load(&g_running) || av_gettime_relative() >= d->deadline;
+}
+
+static int open_rtsp(const gateway_conf_t *cfg, AVFormatContext **pic, int *idx,
+                     input_deadline_t *deadline)
+{
+    AVFormatContext *ic = avformat_alloc_context();
+    if (!ic) return -1;
+    ic->interrupt_callback = (AVIOInterruptCB){interrupt_input, deadline};
+    deadline->deadline = av_gettime_relative() + cfg->rtsp_timeout_us;
+    AVDictionary *opts = NULL;
+    av_dict_set(&opts, "rtsp_transport", cfg->rtsp_transport, 0);
+    av_dict_set(&opts, "analyzeduration", "5000000", 0);
+    av_dict_set(&opts, "probesize", "10485760", 0);
+    av_dict_set(&opts, "fflags", "+discardcorrupt", 0);
+    int ret = avformat_open_input(&ic, cfg->rtsp_url, NULL, &opts);
+    av_dict_free(&opts);
+    if (ret < 0) goto fail;
+    deadline->deadline = av_gettime_relative() + cfg->rtsp_timeout_us;
+    ret = avformat_find_stream_info(ic, NULL);
+    if (ret < 0) goto fail;
+    *idx = av_find_best_stream(ic, AVMEDIA_TYPE_VIDEO, -1, -1, NULL, 0);
+    if (*idx < 0) { ret = *idx; goto fail; }
+    *pic = ic;
+    return 0;
+fail: {
+    char err[128]; av_strerror(ret, err, sizeof(err));
+    LOG_WRN("RTSP open/probe failed: %s", err);
+    avformat_close_input(&ic);
+    return -1;
+}}
 
 static void *receiver_thread(void *arg)
 {
-    const gateway_conf_t *cfg = (const gateway_conf_t *)arg;
-
-    recorder_cfg_t rcfg;
-    memset(&rcfg, 0, sizeof(rcfg));
-    strncpy(rcfg.dir, cfg->storage_dir, sizeof(rcfg.dir) - 1);
-    strncpy(rcfg.prefix, cfg->segment_prefix, sizeof(rcfg.prefix) - 1);
-    rcfg.segment_seconds = cfg->segment_seconds;
-    rcfg.min_free_mb = cfg->storage_min_free_mb;
-
-    while (g_running) {
+    const gateway_conf_t *cfg = arg;
+    int is_usb = !strcmp(cfg->source_type, "v4l2");
+    unsigned reconnects = 0;
+    unsigned long long frames = 0;
+    while (atomic_load(&g_running)) {
         AVFormatContext *ic = NULL;
-        int vidx = -1;
-        if (open_input(cfg, &ic, &vidx) != 0) {
-            LOG_WRN("拉流失败，%d 秒后重连...", cfg->rtsp_reconnect_s);
-            for (int i = 0; i < cfg->rtsp_reconnect_s && g_running; i++) sleep(1);
-            continue;
+        usb_source_t *usb = NULL;
+        recorder_t *rec = NULL;
+        AVPacket *pkt = av_packet_alloc();
+        const AVCodecParameters *cp = NULL;
+        AVRational tb = {0, 1};
+        input_deadline_t deadline = {0};
+        int vidx = -1, fg_ready = 0, rtsp_ready = 0, fps = 0;
+        int applied_segment_seconds = atomic_load(&g_segment_seconds);
+        if (!pkt) { LOG_ERR("Cannot allocate input packet"); break; }
+        if (is_usb) {
+            usb = usb_source_open(cfg);
+            if (!usb) goto cleanup;
+            cp = usb_source_codecpar(usb);
+            tb = usb_source_time_base(usb);
+            fps = cfg->capture_fps; /* Requested rate; frames is the measured output counter. */
+        } else {
+            if (open_rtsp(cfg, &ic, &vidx, &deadline) < 0) goto cleanup;
+            cp = ic->streams[vidx]->codecpar;
+            tb = ic->streams[vidx]->time_base;
+            AVRational fr = ic->streams[vidx]->avg_frame_rate;
+            fps = fr.den ? (int)av_q2d(fr) : 0;
         }
-        g_ic = ic;
-
-        /* (重)创建 recorder（用源流 codecpar） */
-        if (!g_rec) {
-            g_rec = recorder_create(&rcfg, ic->streams[vidx]->codecpar);
-            if (!g_rec) {
-                LOG_ERR("recorder_create 失败");
-                avformat_close_input(&ic);
-                g_ic = NULL;
-                break;
-            }
-        }
-
-        /* 初始化 frame_grabber（解码→缩放→JPEG，供 Web 预览/云） */
-        if (!g_fg_inited) {
-            frame_grabber_cfg_t fgc;
-            memset(&fgc, 0, sizeof(fgc));
-            fgc.target_fps  = cfg->web_mjpeg_fps;   /* 预览帧率 */
-            fgc.out_width   = cfg->ai_frame_width;  /* 缩放宽度 640 */
-            fgc.jpeg_quality= cfg->ai_jpeg_quality;
-            if (frame_grabber_init(&fgc, ic->streams[vidx]->codecpar) == 0) {
-                g_fg_inited = 1;
+        if (!atomic_load(&g_running)) goto cleanup;
+        recorder_cfg_t rcfg = {0};
+        snprintf(rcfg.dir, sizeof(rcfg.dir), "%s", cfg->storage_dir);
+        snprintf(rcfg.prefix, sizeof(rcfg.prefix), "%s", cfg->segment_prefix);
+        rcfg.segment_seconds = applied_segment_seconds;
+        rcfg.min_free_mb = cfg->storage_min_free_mb;
+        rec = recorder_create(&rcfg, (AVCodecParameters *)cp);
+        if (!rec) goto cleanup;
+        frame_grabber_cfg_t fgc = {
+            .target_fps = cfg->web_mjpeg_fps,
+            .out_width = cfg->ai_frame_width,
+            .jpeg_quality = cfg->ai_jpeg_quality
+        };
+        fg_ready = frame_grabber_init(&fgc, (AVCodecParameters *)cp) == 0;
+        if (!fg_ready) LOG_WRN("Preview unavailable; recording continues");
+        if (cfg->rtsp_server_enable)
+            rtsp_ready = rtsp_server_init(cfg->rtsp_server_port, cp) == 0;
+        LOG_INF("Input connected: %s, %dx%d, %s", cfg->source_type,
+                cp->width, cp->height, avcodec_get_name(cp->codec_id));
+        publish_status(cp, fps, rec, frames, reconnects);
+        while (atomic_load(&g_running)) {
+            int ret;
+            if (usb) {
+                ret = usb_source_read(usb, pkt);
+                if (ret == 0) continue;
             } else {
-                LOG_WRN("frame_grabber 初始化失败，预览/上云将不可用");
+                deadline.deadline = av_gettime_relative() + cfg->rtsp_timeout_us;
+                ret = av_read_frame(ic, pkt);
+                if (ret >= 0 && pkt->stream_index != vidx) { av_packet_unref(pkt); continue; }
             }
-        }
-
-        /* 初始化 RTSP 本地预览转发（H.264 passthrough） */
-        if (!g_rtsp_inited && cfg->rtsp_server_enable) {
-            if (rtsp_server_init(cfg->rtsp_server_port, ic->streams[vidx]->codecpar) == 0) {
-                g_rtsp_inited = 1;
-            } else {
-                LOG_WRN("rtsp_server 初始化失败，RTSP 预览将不可用");
-            }
-        }
-
-        AVPacket pkt;
-        av_init_packet(&pkt);
-        int err_count = 0;
-        while (g_running) {
-            int ret = av_read_frame(ic, &pkt);
             if (ret < 0) {
-                char err[128] = {0}; av_strerror(ret, err, sizeof(err));
-                LOG_WRN("av_read_frame: %s，准备重连", err);
+                char err[128]; av_strerror(ret, err, sizeof(err));
+                LOG_WRN("Input read failed: %s; reconnecting", err);
                 break;
             }
-            if (pkt.stream_index == vidx) {
-                int is_key = (pkt.flags & AV_PKT_FLAG_KEY) != 0;
-                /* 时间戳(秒)：RTSP 视频流时基通常 1/90000 */
-                AVRational tb = ic->streams[vidx]->time_base;
-                double ts = tb.den ? pkt.pts * (double)tb.num / tb.den : 0;
-                if (recorder_write_packet(g_rec, &pkt, is_key, ts) != 0) {
-                    if (++err_count > 20) { LOG_WRN("录像写错误过多，重连"); break; }
-                } else {
-                    err_count = 0;
-                }
-                /* 旁路送解码器产出 JPEG 预览帧 */
-                if (g_fg_inited) {
-                    frame_grabber_feed(&pkt);
-                }
-                /* 旁路送 RTSP server 转发给预览客户端（H.264 passthrough） */
-                if (g_rtsp_inited) {
-                    rtsp_server_on_packet(&pkt, &ic->streams[vidx]->time_base);
-                }
+            int segment_seconds = atomic_load(&g_segment_seconds);
+            if (segment_seconds != applied_segment_seconds) {
+                recorder_set_segment_seconds(rec, segment_seconds);
+                applied_segment_seconds = segment_seconds;
             }
-            av_packet_unref(&pkt);
+            if (recorder_write_packet(rec, pkt, !!(pkt->flags & AV_PKT_FLAG_KEY), tb) < 0) {
+                LOG_WRN("Recording failed; reopening pipeline");
+                break;
+            }
+            if (fg_ready) frame_grabber_feed(pkt);
+            if (rtsp_ready) rtsp_server_on_packet(pkt, &tb);
+            ++frames;
+            publish_status(cp, fps, rec, frames, reconnects);
+            av_packet_unref(pkt);
         }
-        av_packet_unref(&pkt);
-
-        g_ic = NULL;
+cleanup:
+        publish_status(NULL, 0, NULL, frames, reconnects);
+        av_packet_free(&pkt);
+        if (rtsp_ready) rtsp_server_deinit();
+        if (fg_ready) frame_grabber_deinit();
+        recorder_destroy(rec);
+        usb_source_close(usb);
         avformat_close_input(&ic);
-
-        if (g_running) {
-            LOG_INF("休眠 %d 秒后重连...", cfg->rtsp_reconnect_s);
-            for (int i = 0; i < cfg->rtsp_reconnect_s && g_running; i++) sleep(1);
+        if (atomic_load(&g_running)) {
+            ++reconnects;
+            publish_status(NULL, 0, NULL, frames, reconnects);
+            LOG_INF("Retrying input in %d s (attempt %u)", cfg->rtsp_reconnect_s, reconnects);
+            for (int i = 0; i < cfg->rtsp_reconnect_s * 10 && atomic_load(&g_running); ++i)
+                usleep(100000);
         }
     }
-
+    publish_status(NULL, 0, NULL, frames, reconnects);
     return NULL;
 }
 
 int stream_receiver_start(const gateway_conf_t *cfg)
 {
-    if (g_running) return 0;
-    /* FFmpeg 网络层初始化（必须，否则 RTSP 连接异常） */
+    if (atomic_load(&g_running)) return 0;
+    g_cfg = *cfg;
+    atomic_store(&g_segment_seconds, cfg->segment_seconds);
+    publish_status(NULL, 0, NULL, 0, 0);
     avformat_network_init();
-    g_running = 1;
-    if (pthread_create(&g_tid, NULL, receiver_thread, (void *)cfg) != 0) {
-        g_running = 0;
-        LOG_ERR("创建拉流线程失败");
+    atomic_store(&g_running, 1);
+    if (pthread_create(&g_tid, NULL, receiver_thread, &g_cfg) != 0) {
+        atomic_store(&g_running, 0);
         return -1;
     }
-    LOG_INF("拉流线程已启动");
     return 0;
 }
 
 void stream_receiver_stop(void)
 {
-    if (!g_running) return;
-    g_running = 0;
+    if (!atomic_exchange(&g_running, 0)) return;
     pthread_join(g_tid, NULL);
-    if (g_ic) avformat_close_input(&g_ic);
-    if (g_rec) { recorder_destroy(g_rec); g_rec = NULL; }
-    if (g_fg_inited) { frame_grabber_deinit(); g_fg_inited = 0; }
-    if (g_rtsp_inited) { rtsp_server_deinit(); g_rtsp_inited = 0; }
-    LOG_INF("拉流线程已停止");
+    LOG_INF("Input pipeline stopped");
 }
 
 int stream_receiver_get_status(stream_status_t *st)
 {
     if (!st) return -1;
-    memset(st, 0, sizeof(*st));
-    st->connected = (g_ic != NULL);
-    if (g_ic) {
-        /* 找视频流读分辨率/fps */
-        for (unsigned i = 0; i < g_ic->nb_streams; i++) {
-            if (g_ic->streams[i]->codecpar->codec_type == AVMEDIA_TYPE_VIDEO) {
-                AVCodecParameters *cp = g_ic->streams[i]->codecpar;
-                st->width = cp->width;
-                st->height = cp->height;
-                AVRational fr = g_ic->streams[i]->avg_frame_rate;
-                if (fr.den) st->fps = (int)((fr.num + fr.den / 2) / fr.den);
-                break;
-            }
-        }
-    }
-    if (g_rec) {
-        recorder_status_t rs;
-        if (recorder_get_status(g_rec, &rs) == 0) {
-            st->recording = rs.recording;
-            st->bitrate_kbps = rs.bitrate_kbps;
-            snprintf(st->cur_segment, sizeof(st->cur_segment), "%s", rs.cur_segment);
-        }
-    }
+    pthread_mutex_lock(&g_status_lock);
+    *st = g_status;
+    pthread_mutex_unlock(&g_status_lock);
     return 0;
 }
 
 void stream_receiver_set_segment_seconds(int seconds)
 {
-    if (g_rec) recorder_set_segment_seconds(g_rec, seconds);
+    if (seconds > 0) atomic_store(&g_segment_seconds, seconds);
 }

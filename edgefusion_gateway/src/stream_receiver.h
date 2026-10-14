@@ -14,6 +14,9 @@ void stream_receiver_stop(void);
 
 /* 拉流运行状态快照（供 Web /api/status 聚合） */
 typedef struct {
+    char source_type[16];
+    unsigned long long frames; /* Total encoded video packets delivered to sinks. */
+    unsigned reconnects;       /* Retry attempts, including failed initial opens. */
     int  connected;          /* 源流是否连上 */
     int  width;              /* 源分辨率宽 */
     int  height;             /* 源分辨率高 */
