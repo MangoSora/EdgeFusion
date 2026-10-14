@@ -1,0 +1,45 @@
+# EdgeFusion Gateway 的 systemd 服务单元（板端：DshanPi-A1 / Armbian / Ubuntu 24.04）
+#
+# 安装请用 scripts/install-service.sh（会按当前用户与仓库绝对路径替换 @USER@ / @DIR@）：
+#     bash scripts/install-service.sh
+# 手动安装等价于：
+#     sed -e "s|@USER@|$USER|g" -e "s|@DIR@|$PWD|g" deploy/edgefusion-gateway.service \
+#       | sudo tee /etc/systemd/system/edgefusion-gateway.service
+#     sudo systemctl daemon-reload && sudo systemctl enable --now edgefusion-gateway
+#
+# 为什么需要它：此前靠 SSH 前台运行（docs/RK3576_PORT.md“启动与观察”），
+# SSH 一断就跟随 SIGHUP 结束；也没有开机自启与崩溃重启。
+
+[Unit]
+Description=EdgeFusion Gateway (USB camera record + Web preview)
+Documentation=file://@DIR@/docs/RK3576_PORT.md
+After=network-online.target local-fs.target
+Wants=network-online.target
+# 反复失败时别无限重启（systemd 229+ 要求这两项写在 [Unit]）
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=@USER@
+WorkingDirectory=@DIR@
+ExecStart=@DIR@/build-native/edgefusion_gateway -path @DIR@/config/rk3576-usb.conf
+
+# 进程自身有摄像头重连逻辑，正常情况下不该退出；异常退出才重启，避免拔出设备时刷重启
+Restart=on-failure
+RestartSec=3
+
+# 优雅退出：主循环收到 SIGINT 会依次停 Web/采集/录像（见 src/main.c），留足收尾时间
+KillSignal=SIGINT
+KillMode=mixed
+TimeoutStopSec=15
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=edgefusion-gateway
+
+# UVC 摄像头节点通常属于 video 组
+SupplementaryGroups=video
+
+[Install]
+WantedBy=multi-user.target
