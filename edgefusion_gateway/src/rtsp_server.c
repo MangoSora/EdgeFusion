@@ -1,5 +1,6 @@
 #include "rtsp_server.h"
 #include "log.h"
+#include "tx_queue.h"
 
 #include "libavutil/mathematics.h"
 
@@ -24,6 +25,10 @@
 #define MTU 1400
 #define RTP_HDR_LEN 12
 #define MAX_CLIENTS 8
+
+/* 单客户端发送队列上限，以及"积压持续排不空"多久算慢客户端 */
+#define RTSP_TX_QUEUE_BYTES  (512 * 1024)
+#define RTSP_CLIENT_LAG_MS   3000
 
 /* ---------- Base64 ---------- */
 static const char B64[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
@@ -160,7 +165,8 @@ typedef struct client {
     uint16_t           seq;
     uint32_t           ssrc;
     uint32_t           ts_base;
-    int                fail_count;
+    /* 发送路径：推流线程只入队，本客户端的连接线程负责排空 */
+    tx_queue_t        *tx;
     struct client     *next;
 } client_t;
 
@@ -169,8 +175,17 @@ static pthread_mutex_t g_mtx = PTHREAD_MUTEX_INITIALIZER;
 static int            g_listen_fd = -1;
 static pthread_t      g_tid;
 static atomic_int   g_running = 0;
+static atomic_int   g_client_threads = 0;   /* 活跃客户端线程数（停止时等待归零） */
 static char           g_sdp[1024];
 static int            g_sdp_len;
+
+/* 单调毫秒时钟，用于慢客户端判定 */
+static int64_t now_ms(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
 
 /* ---------- 工具 ---------- */
 static void set_nonblock(int fd)
@@ -192,9 +207,27 @@ static int send_all(int fd, const char *buf, int len)
 }
 
 /* ---------- RTP 发送 ---------- */
-/* 为一个 NALU 生成 RTP 包并写到客户端。返回 0 成功，-1 该客户端应断开。 */
-static int send_nal_to_client(client_t *c, const uint8_t *nal, int nal_len,
-                              uint32_t ts, int marker)
+/* 把 RTP 包放进该客户端的发送队列（TCP 时补 interleaved 头）。
+ * 这里不做任何 socket I/O，因此推流线程不会被慢客户端阻塞。 */
+static void queue_rtp_packet(client_t *c, const uint8_t *rtp, int pktlen)
+{
+    if (!c->tx) return;
+    if (c->tr == TR_TCP) {
+        uint8_t buf[4 + MTU + RTP_HDR_LEN + 2];
+        buf[0] = '$';
+        buf[1] = (uint8_t)c->rtp_channel;
+        buf[2] = (uint8_t)((pktlen >> 8) & 0xff);
+        buf[3] = (uint8_t)(pktlen & 0xff);
+        memcpy(buf + 4, rtp, (size_t)pktlen);
+        tx_queue_push(c->tx, buf, (size_t)pktlen + 4);
+    } else {
+        tx_queue_push(c->tx, rtp, (size_t)pktlen);
+    }
+}
+
+/* 为一个 NALU 生成 RTP 包并放入队列。始终返回 0，队列健康状况由统计反映。 */
+static int queue_nal_to_client(client_t *c, const uint8_t *nal, int nal_len,
+                               uint32_t ts, int marker)
 {
     uint8_t rtp[MTU + RTP_HDR_LEN + 2];
     int max_payload = MTU - RTP_HDR_LEN;
@@ -211,19 +244,7 @@ static int send_nal_to_client(client_t *c, const uint8_t *nal, int nal_len,
         memcpy(rtp + RTP_HDR_LEN, nal, nal_len);
         int pktlen = RTP_HDR_LEN + nal_len;
 
-        if (c->tr == TR_TCP) {
-            /* interleaved: '$' channel len16 */
-            uint8_t hdr[4] = { '$', (uint8_t)c->rtp_channel,
-                               (uint8_t)((pktlen >> 8) & 0xff), (uint8_t)(pktlen & 0xff) };
-            if (send_all(c->fd, (char *)hdr, 4) < 0) return -1;
-            if (send_all(c->fd, (char *)rtp, pktlen) < 0) return -1;
-        } else { /* UDP */
-            if (sendto(c->udp_rtp_fd, rtp, pktlen, 0,
-                       (struct sockaddr *)&c->client_rtp_addr, sizeof(c->client_rtp_addr)) < 0) {
-                if (errno == EAGAIN || errno == EWOULDBLOCK) return 0; /* 丢帧 */
-                return -1;
-            }
-        }
+        queue_rtp_packet(c, rtp, pktlen);
         return 0;
     }
 
@@ -252,18 +273,7 @@ static int send_nal_to_client(client_t *c, const uint8_t *nal, int nal_len,
         memcpy(rtp + RTP_HDR_LEN + 2, nal + offset, frag);
         int pktlen = RTP_HDR_LEN + 2 + frag;
 
-        if (c->tr == TR_TCP) {
-            uint8_t hdr[4] = { '$', (uint8_t)c->rtp_channel,
-                               (uint8_t)((pktlen >> 8) & 0xff), (uint8_t)(pktlen & 0xff) };
-            if (send_all(c->fd, (char *)hdr, 4) < 0) return -1;
-            if (send_all(c->fd, (char *)rtp, pktlen) < 0) return -1;
-        } else {
-            if (sendto(c->udp_rtp_fd, rtp, pktlen, 0,
-                       (struct sockaddr *)&c->client_rtp_addr, sizeof(c->client_rtp_addr)) < 0) {
-                if (errno == EAGAIN || errno == EWOULDBLOCK) return 0;
-                return -1;
-            }
-        }
+        queue_rtp_packet(c, rtp, pktlen);
         offset += frag;
         first = 0;
     }
@@ -297,27 +307,15 @@ void rtsp_server_on_packet(const AVPacket *pkt, const AVRational *tb)
     parse_nalus(pkt->data, pkt->size, collect_cb, &list);
     if (list.count == 0) return;
 
+    /* 锁内只做入队（memcpy）：慢客户端只会让自己队列溢出，
+     * 既不会阻塞推流线程，也不会拖住 /api/status 与新连接。 */
     pthread_mutex_lock(&g_mtx);
-    client_t *c = g_clients;
-    while (c) {
-        if (!c->playing) { c = c->next; continue; }
-        int err = 0;
-        for (int i = 0; i < list.count && !err; i++) {
+    for (client_t *c = g_clients; c; c = c->next) {
+        if (!c->playing || !c->tx) continue;
+        for (int i = 0; i < list.count; i++) {
             int marker = (i == list.count - 1); /* 最后一 NAL 最后一包置 marker */
-            if (send_nal_to_client(c, list.nals[i].p, list.nals[i].len, ts, marker) < 0) {
-                err = 1;
-            }
+            queue_nal_to_client(c, list.nals[i].p, list.nals[i].len, ts, marker);
         }
-        if (err) {
-            c->fail_count++;
-            if (c->fail_count > 3) {
-                LOG_INF("rtsp 客户端 session=%u 发送失败过多，标记断开", c->session_id);
-                c->playing = 0;
-            }
-        } else {
-            c->fail_count = 0;
-        }
-        c = c->next;
     }
     pthread_mutex_unlock(&g_mtx);
 }
@@ -356,16 +354,50 @@ static int hdr_get(const char *req, const char *name, char *out, int outcap)
     return 0;
 }
 
+/* 排空该客户端的发送队列（非阻塞）。返回 0 正常（可能仍有剩余），-1 表示连接已坏。 */
+static int client_drain(client_t *c)
+{
+    if (!c->tx) return 0;
+    for (;;) {
+        const unsigned char *p = NULL;
+        size_t n = tx_queue_peek(c->tx, &p);
+        if (n == 0) return 0;
+        ssize_t sent;
+        if (c->tr == TR_UDP && c->udp_rtp_fd >= 0)
+            sent = sendto(c->udp_rtp_fd, p, n, MSG_DONTWAIT,
+                          (struct sockaddr *)&c->client_rtp_addr, sizeof(c->client_rtp_addr));
+        else
+            sent = send(c->fd, p, n, MSG_NOSIGNAL | MSG_DONTWAIT);
+        if (sent > 0) { tx_queue_consume(c->tx, (size_t)sent); continue; }
+        if (sent < 0 && (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)) return 0;
+        return -1;                              /* 连接已坏 */
+    }
+}
+
+
 static void close_client(client_t *c)
 {
+    if (c->tx) tx_queue_destroy(c->tx);
     if (c->fd >= 0) close(c->fd);
     if (c->udp_rtp_fd >= 0) close(c->udp_rtp_fd);
     if (c->udp_rtcp_fd >= 0) close(c->udp_rtcp_fd);
     free(c);
 }
 
-static void handle_client(int cfd, struct sockaddr_in *caddr)
+typedef struct {
+    int                fd;
+    struct sockaddr_in addr;
+} client_arg_t;
+
+/* 每个客户端一个线程：处理自己的控制信令，并负责把自己发送队列里的数据排空。
+ * 线程结束时自行从链表摘除并释放结构体（rtsp_server_deinit 只做唤醒与等待）。 */
+static void *client_thread(void *arg)
 {
+    client_arg_t *ca = arg;
+    int cfd = ca->fd;
+    struct sockaddr_in caddr = ca->addr;
+    free(ca);
+
     set_nonblock(cfd); /* 控制信道也非阻塞，但响应用 send_all 阻塞写 */
     /* 实际控制信令用阻塞更简单；恢复阻塞 */
     int fl = fcntl(cfd, F_GETFL, 0);
@@ -374,21 +406,25 @@ static void handle_client(int cfd, struct sockaddr_in *caddr)
     struct timeval send_timeout = {.tv_sec = 2};
     setsockopt(cfd, SOL_SOCKET, SO_SNDTIMEO, &send_timeout, sizeof(send_timeout));
     client_t *c = calloc(1, sizeof(client_t));
-    if (!c) { close(cfd); return; }
+    if (!c) { close(cfd); atomic_fetch_sub(&g_client_threads, 1); return NULL; }
     c->fd = cfd;
     c->udp_rtp_fd = -1;
     c->udp_rtcp_fd = -1;
     c->tr = TR_NONE;
-    c->ssrc = (uint32_t)((caddr->sin_addr.s_addr & 0xffff) ^ (time(NULL) & 0xffff)) | 0x80000000;
+    c->tx = tx_queue_create(RTSP_TX_QUEUE_BYTES);
+    c->ssrc = (uint32_t)((caddr.sin_addr.s_addr & 0xffff) ^ (time(NULL) & 0xffff)) | 0x80000000;
 
     char buf[4096];
     while (g_running) {
-        /* 读一行请求（简化：一次读整段，按 \r\n\r\n 分） */
-        /* Recheck stop even if a client sends no more RTSP commands. */
-        struct pollfd pfd = {.fd = cfd, .events = POLLIN};
+        /* 同时关心可读（RTSP 信令）与可写（排空发送队列） */
+        struct pollfd pfd = {.fd = cfd, .events = POLLIN | (c->playing ? POLLOUT : 0)};
         int ready = poll(&pfd, 1, 200);
-        if (!ready || (ready < 0 && errno == EINTR)) continue;
-        if (ready < 0 || (pfd.revents & (POLLERR | POLLHUP | POLLNVAL))) break;
+        if (ready < 0) { if (errno == EINTR) continue; break; }
+        if (ready > 0) {
+            if (pfd.revents & (POLLERR | POLLHUP | POLLNVAL)) break;
+            if ((pfd.revents & (POLLOUT | POLLIN)) && client_drain(c) < 0) break;
+        }
+        if (ready <= 0 || !(pfd.revents & POLLIN)) continue;
         ssize_t n = recv(cfd, buf, sizeof(buf) - 1, 0);
         if (n <= 0) break;
         buf[n] = 0;
@@ -419,7 +455,7 @@ static void handle_client(int cfd, struct sockaddr_in *caddr)
             char cseq[16];
             hdr_get(buf, "CSeq", cseq, sizeof(cseq));
             /* 生成 session id */
-            c->session_id = (uint32_t)(time(NULL) ^ (caddr->sin_port << 16)) | 0x10000;
+            c->session_id = (uint32_t)(time(NULL) ^ (caddr.sin_port << 16)) | 0x10000;
             snprintf(session_hdr, sizeof(session_hdr), "Session: %u;timeout=60", c->session_id);
 
             if (strstr(transport, "TCP") || strstr(transport, "interleaved")) {
@@ -435,7 +471,7 @@ static void handle_client(int cfd, struct sockaddr_in *caddr)
                     "Transport: RTP/AVP/TCP;unicast;interleaved=%d-%d\r\n\r\n",
                     cseq, session_hdr, ch, ch + 1);
                 LOG_INF("rtsp SETUP TCP interleaved=%d session=%u from %s:%d",
-                        ch, c->session_id, inet_ntoa(caddr->sin_addr), ntohs(caddr->sin_port));
+                        ch, c->session_id, inet_ntoa(caddr.sin_addr), ntohs(caddr.sin_port));
             } else {
                 /* UDP unicast */
                 c->tr = TR_UDP;
@@ -460,11 +496,11 @@ static void handle_client(int cfd, struct sockaddr_in *caddr)
                 /* 客户端地址 */
                 memset(&c->client_rtp_addr, 0, sizeof(c->client_rtp_addr));
                 c->client_rtp_addr.sin_family = AF_INET;
-                c->client_rtp_addr.sin_addr = caddr->sin_addr;
+                c->client_rtp_addr.sin_addr = caddr.sin_addr;
                 c->client_rtp_addr.sin_port = htons(cport);
                 memset(&c->client_rtcp_addr, 0, sizeof(c->client_rtcp_addr));
                 c->client_rtcp_addr.sin_family = AF_INET;
-                c->client_rtcp_addr.sin_addr = caddr->sin_addr;
+                c->client_rtcp_addr.sin_addr = caddr.sin_addr;
                 c->client_rtcp_addr.sin_port = htons(cport + 1);
                 rlen = snprintf(resp, sizeof(resp),
                     "RTSP/1.0 200 OK\r\nCSeq: %s\r\n%s\r\n"
@@ -472,7 +508,7 @@ static void handle_client(int cfd, struct sockaddr_in *caddr)
                     cseq, session_hdr, cport, cport + 1, sport_rtp, sport_rtcp);
                 LOG_INF("rtsp SETUP UDP client_port=%d server_port=%d-%d session=%u from %s:%d",
                         cport, sport_rtp, sport_rtcp, c->session_id,
-                        inet_ntoa(caddr->sin_addr), ntohs(caddr->sin_port));
+                        inet_ntoa(caddr.sin_addr), ntohs(caddr.sin_port));
             }
         } else if (!strcmp(method, "PLAY")) {
             char cseq[16]; hdr_get(buf, "CSeq", cseq, sizeof(cseq));
@@ -515,14 +551,16 @@ static void handle_client(int cfd, struct sockaddr_in *caddr)
         }
     }
 
-    /* 客户端断开：若已入链表则移除 */
+    /* 客户端断开：先摘链表（推流侧不会再看到它），再释放自己的资源，最后递减线程计数 */
     pthread_mutex_lock(&g_mtx);
     client_t **pp = &g_clients;
     while (*pp && *pp != c) pp = &(*pp)->next;
     if (*pp) *pp = c->next;
     pthread_mutex_unlock(&g_mtx);
     close_client(c);
+    atomic_fetch_sub(&g_client_threads, 1);
     LOG_INF("rtsp 控制连接断开");
+    return NULL;
 }
 
 static void *listen_thread(void *arg)
@@ -533,7 +571,24 @@ static void *listen_thread(void *arg)
         socklen_t clen = sizeof(caddr);
         int cfd = accept(g_listen_fd, (struct sockaddr *)&caddr, &clen);
         if (cfd < 0) { if (errno == EINTR) continue; continue; }
-        handle_client(cfd, &caddr);
+
+        /* 每个客户端一个线程：不再串行服务，一个客户端卡住不影响其他人 */
+        client_arg_t *ca = malloc(sizeof(*ca));
+        if (!ca) { close(cfd); continue; }
+        ca->fd = cfd;
+        ca->addr = caddr;
+        pthread_t tid;
+        atomic_fetch_add(&g_client_threads, 1);
+        if (pthread_create(&tid, NULL, client_thread, ca) != 0) {
+            LOG_WRN("rtsp 客户端线程创建失败，拒绝该连接");
+            atomic_fetch_sub(&g_client_threads, 1);
+            free(ca);
+            close(cfd);
+            continue;
+        }
+        pthread_detach(tid);
+        LOG_INF("rtsp 新客户端 from %s:%d（并发服务）",
+                inet_ntoa(caddr.sin_addr), ntohs(caddr.sin_port));
     }
     return NULL;
 }
@@ -584,18 +639,27 @@ int rtsp_server_client_count(void)
     return n;
 }
 
+
+
 void rtsp_server_deinit(void)
 {
-    if (!g_running) return;
     if (!g_running) return;
     g_running = 0;
     if (g_listen_fd >= 0) { shutdown(g_listen_fd, SHUT_RDWR); close(g_listen_fd); g_listen_fd = -1; }
     pthread_join(g_tid, NULL);
-    /* 关闭所有客户端 */
+
+    /* 客户端结构体由各线程自行释放：这里只唤醒它们（shutdown 让阻塞中的 recv/poll 返回），
+     * 再等线程计数归零，避免 detached 线程仍在访问 client_t 时释放内存。 */
     pthread_mutex_lock(&g_mtx);
-    client_t *c = g_clients;
-    while (c) { client_t *n = c->next; close_client(c); c = n; }
-    g_clients = NULL;
+    for (client_t *c = g_clients; c; c = c->next) {
+        c->playing = 0;
+        if (c->fd >= 0) shutdown(c->fd, SHUT_RDWR);
+        if (c->udp_rtp_fd >= 0) shutdown(c->udp_rtp_fd, SHUT_RDWR);
+    }
     pthread_mutex_unlock(&g_mtx);
+
+    for (int i = 0; i < 20 && atomic_load(&g_client_threads) > 0; ++i) usleep(100000);
+    int left = atomic_load(&g_client_threads);
+    if (left > 0) LOG_WRN("rtsp 仍有 %d 个客户端线程未退出", left);
     LOG_INF("rtsp_server 已停止");
 }
