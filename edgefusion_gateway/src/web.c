@@ -256,6 +256,12 @@ static void serve_status(int cfd)
         off += snprintf(json + off, sizeof(json) - off,
             ",\"source_type\":\"%s\",\"frames\":%llu,\"reconnects\":%u",
             ss.source_type, ss.frames, ss.reconnects);
+        off += snprintf(json + off, sizeof(json) - off,
+            ",\"preview_queue\":{\"depth\":%d,\"high\":%d,\"dropped\":%llu,\"processed\":%llu}",
+            ss.preview_queue_depth, ss.preview_queue_high,
+            ss.preview_dropped, ss.preview_processed);
+        off += snprintf(json + off, sizeof(json) - off,
+            ",\"preview_raw_jpeg\":%s", ss.preview_raw_jpeg ? "true" : "false");
     } else {
         off += snprintf(json + off, sizeof(json) - off,
             "\"connected\":false");

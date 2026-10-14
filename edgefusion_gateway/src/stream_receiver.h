@@ -24,6 +24,13 @@ typedef struct {
     int  recording;          /* 是否在录 */
     char cur_segment[128];   /* 当前段文件名 */
     int  bitrate_kbps;       /* 当前段码率 */
+
+    /* 预览/转发队列指标：用来证明“采集与录像不再被预览拖住” */
+    int                preview_queue_depth;   /* 当前排队的 H.264 包数 */
+    int                preview_queue_high;    /* 队列曾达到的最大深度 */
+    unsigned long long preview_dropped;       /* 队列满时丢弃的旧包数 */
+    unsigned long long preview_processed;     /* 预览线程累计处理的包数 */
+    int                preview_raw_jpeg;      /* 1=预览直接使用相机 MJPEG（未解码 H.264） */
 } stream_status_t;
 int  stream_receiver_get_status(stream_status_t *st);
 
