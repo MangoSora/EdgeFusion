@@ -462,3 +462,66 @@ bash scripts/install-service.sh --uninstall
 
 说明：本节的文件与流程已就绪，但**尚未在开发板上执行过**，各项结论以待板端结果为准。
 
+## 改动五：RTSP 客户端并发与发送隔离
+
+### 问题（板端复现）
+
+原实现有两处缺陷：`listen_thread()` 在 accept 后**内联**调用 `handle_client()`，即"一次只服务一个客户端，
+直到它断开"；`rtsp_server_on_packet()` 又在持有全局锁 `g_mtx` 的情况下逐个客户端阻塞 `send()`
+（`SO_SNDTIMEO = 2s`），而 `/api/status` 与新连接都要同一把锁。
+
+压力复现（4 个"连上但不读"的客户端）：
+
+| 现象 | 数据 |
+|---|---|
+| 客户端并发 | 4 个连接只有 1 个完成握手，其余 3 个 `ERROR: timed out` |
+| `/api/status` | 21 ms → **5025 ms（超时）** |
+| 预览队列 | `dropped` 0 → 178 → 289 |
+| 录像 | 未受影响（`frames` 346 → 1410 持续增长） |
+| 踢掉停读客户端耗时 | 24 秒 |
+
+> 边界：单客户端停读 15 s 无法复现（内核缓冲吸收 2.89 MB，码率 ~165 KB/s）。
+> 该问题在**高码率 / 多客户端 / 长时间停读**时才暴露。
+
+### 改动
+
+- `listen_thread()`：accept 后 `pthread_create(client_thread)` + detach —— 每客户端一个线程；
+- 发送路径改为"只入队"：`queue_rtp_packet()` 把 RTP 包（TCP 时含 interleaved 头）放进该客户端的
+  有界发送队列 `tx_queue`（容量 512 KB，溢出丢弃整段积压并计数），**锁内零 socket I/O**；
+- 连接线程 `poll(POLLIN|POLLOUT, 200ms)`：可写时 `send(MSG_DONTWAIT)` 排空队列，`EAGAIN` 等下一轮；
+- 慢客户端判定：积压超过队列一半、或溢出次数增长且持续 > 3 s → 断开并计数；
+- 停止流程：`rtsp_server_deinit()` 只做 `shutdown()` 唤醒 + 等线程计数归零，
+  客户端结构体由各自线程释放（避免 detached 线程访问已释放内存）；
+- `/api/status` 的 `rtsp_server` 增加 `slow_clients`、`max_queued_kb`。
+
+### 板端验证结果
+
+| 检查 | 修复前 | 修复后 |
+|---|---|---|
+| **两个播放器同时拉流**（真机双客户端） | 第二个被挡住、不推进 | **各收到 349 帧 / 15 s；`clients:2`；日志 PLAY ×2** |
+| 4–5 客户端并发握手 | 1/4 | 4/4、5/5 |
+| `/api/status` 延迟（4 停读客户端期间） | 5025 ms（超时） | **19–50 ms** |
+| 预览丢包 | 289 | **0** |
+| 正常客户端（ffmpeg 连续拉流 25 s） | — | 647 帧、28–30 fps、不断流 |
+
+### 未验证与边界（**不作为已完成项**）
+
+- **慢客户端踢出分支未触发**：30 s / 90 s / 120 s 停读、640×480 与 1080p 压测中
+  `slow_clients` 始终为 0。判断为"过载兜底"——默认码率下内核缓冲足以吸收停读流量，
+  队列未持续占满，因此不会误杀；要触发需要更高码率或更多客户端。
+  **"断开慢客户端"这条分支目前没有实测证据。**
+- UDP 传输路径按同样逻辑改写，但未单独验证（默认走 TCP interleaved）。
+- 未实现：RTCP、RTP 重传、每客户端统计的细粒度上报。
+
+### 复现方法
+
+~~~bash
+# 启动带 RTSP 转发的网关后：
+ffmpeg -nostdin -v error -stats -rtsp_transport tcp -i rtsp://127.0.0.1:8554/track0 -t 15 -an -f null - &
+ffmpeg -nostdin -v error -stats -rtsp_transport tcp -i rtsp://127.0.0.1:8554/track0 -t 15 -an -f null - &
+curl -s http://127.0.0.1:8080/api/status        # clients 应为 2
+python3 scripts/slow-rtsp-client.py 127.0.0.1 8554 60   # 慢客户端复现工具
+~~~
+
+> 后台运行 ffmpeg 必须加 `-nostdin`，否则会被 SIGTTIN 挂起（不拉流也不报错）。
+
