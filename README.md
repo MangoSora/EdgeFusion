@@ -1,6 +1,63 @@
-# EdgeFusion — 云端协同智能 NVR
+# EdgeFusion — RK3576 单板智能 NVR（上游项目的二次开发）
 
-> **RK3576 / USB 适配开发中**：新增 DshanPi-A1（Ubuntu 24.04 Armbian）USB MJPEG → 软件 H.264 → 原网关录像/Web 的首版代码。构建、验证与改造边界见 [RK3576 适配说明](edgefusion_gateway/docs/RK3576_PORT.md)。下文保留上游 V821 + IMX6ULL 架构说明，不代表当前板端验证结果。
+## 这是什么
+
+**基于开源项目 [dshanpi/EdgeFusion_Smart_NVR](https://github.com/dshanpi/EdgeFusion_Smart_NVR) 的二次开发。**
+上游是「V821 端侧采集 + IMX6ULL 边侧录像 + 云端分析」的三层架构；本仓库把它改造成
+**单块 DshanPi-A1（RK3576）+ 一个 USB 摄像头**就能独立运行，并保留录像、预览、回放与 RTSP 转发能力。
+
+| 来源 | 内容 |
+|---|---|
+| **上游提供** | 网关主框架、录像分段封装、SQLite 事件库、Web 页面、自研轻量 RTSP 服务端、V821 端侧 MPP 工程 |
+| **我做的改造** | USB(V4L2) 采集链路、MJPEG→H.264 软件编码、有界队列与线程解耦、预览直通、色彩范围缺陷修复、测试与度量工具、systemd 服务化 |
+
+- 逐项改动、验证命令与板端原始证据：**[edgefusion_gateway/docs/RK3576_PORT.md](edgefusion_gateway/docs/RK3576_PORT.md)**
+- "我做了什么 / 验证到什么程度 / 没做什么"：**[docs/MY_WORK.md](docs/MY_WORK.md)**
+
+### 当前链路（本仓库实际形态）
+
+```
+USB UVC 摄像头 ──MJPEG──▶ V4L2 采集(mmap) ──▶ MJPEG 解码 ──▶ 色彩范围/尺度转换 ──▶ libx264 编码
+                              │                                                      │
+                              └── 原始 JPEG ──▶ 预览(Web MJPEG)         分段 MP4 录像 + RTSP 转发
+                                                                                    │
+                                                                          Web：预览/回放/事件
+```
+
+### 硬件与系统
+
+| 项 | 值 |
+|---|---|
+| 开发板 | DshanPi-A1（RK3576，aarch64） |
+| 系统 | 100ASK Armbian 25.11 / Ubuntu 24.04 noble，内核 6.1.115-vendor-rk35xx |
+| 摄像头 | USB UVC（MJPEG，640×480@30fps 起，最高 2560×1440） |
+| 构建 | 板端原生 `make -f Makefile.native`（gcc + FFmpeg/libx264 + sqlite3 + json-c） |
+
+### 快速开始（板端）
+
+```bash
+cd edgefusion_gateway
+make -f Makefile.native -j2
+bash scripts/run-usb.sh          # 前台运行，Ctrl+C 优雅退出
+# 浏览器打开 http://<板子IP>:8080 → 实时预览 / 录像回放 / 事件
+```
+
+常驻服务：`bash scripts/install-service.sh`（systemd 单元，含优雅退出与崩溃重启）
+
+### 已验证结果（板端实测，非推测）
+
+| 验证 | 命令 | 结果 |
+|---|---|---|
+| 单元与回归测试 | `make -f Makefile.native test` | **8 项 PASS**：录像时间基/分段、色彩范围、队列语义与并发 |
+| USB 全链路冒烟 | `bash scripts/smoke-usb.sh` | **5 项 PASS**：出段可解码、预览异步零丢包、无弃用告警、5 秒内退出 |
+| 60 秒性能采样 | `bash scripts/measure-run.sh 60` | CPU 均值 44.0%（峰 73%）、RSS ≤45 MB、24.80 包/秒、预览丢包 0 |
+
+> 未验证的部分（摄像头热插拔、慢客户端隔离修复、24–72h 稳定性、MPP 硬编码）在
+> [docs/MY_WORK.md](docs/MY_WORK.md) 中逐条列明，不写成已完成。
+
+---
+
+## 上游项目背景（V821 + IMX6ULL，非本仓库当前形态）
 
 基于 **V821（端）+ IMX6ULL（边）+ 云端大模型（云）** 三层架构的智能网络视频录像机。V821 无线采集 H.264 推流，IMX6ULL 拉流录像并提取关键帧上云做视觉分析，低成本实现「会思考」的 NVR。
 
@@ -144,7 +201,7 @@ curl -s http://192.168.1.59:8080/api/status    # 状态：stream/recording/cloud
 
 ---
 
-## 当前状态（2026-07-02）
+## 上游项目状态（截至上游最后一次更新）
 
 | 阶段 | 状态 |
 |------|------|
@@ -158,14 +215,20 @@ curl -s http://192.168.1.59:8080/api/status    # 状态：stream/recording/cloud
 | 成本优化（V821 pdet 预筛选） | ⏳ 待办 |
 | OTA / 多路接入 / 72h 稳定性 | ⏳ 待办 |
 
+> 上表是**上游项目**在其自研硬件（V821 + IMX6ULL）上的状态，用于说明来源。
+> 本仓库在 RK3576 单板上的实际状态与验证证据见 [docs/MY_WORK.md](docs/MY_WORK.md)。
+
 ---
 
 ## 文档导航
 
 | 想了解 | 看这里 |
 |--------|--------|
-| 项目全貌、架构、模块职责 | [`PROJECT_INTRO.md`](PROJECT_INTRO.md) |
-| 立项背景、硬件选型、实施计划 | [`IMX6ULL_V821_Project.md`](IMX6ULL_V821_Project.md) |
-| V821 端编译/运行/排错 | [`edgefusion_vision/README.md`](edgefusion_vision/README.md) |
-| IMX6ULL 端编译/运行/排错 | [`edgefusion_gateway/README.md`](edgefusion_gateway/README.md) |
-| 网关任务书与决策点 | [`edgefusion_gateway/docs/TASK.md`](edgefusion_gateway/docs/TASK.md) |
+| **我的改造清单与验证边界** | [`docs/MY_WORK.md`](docs/MY_WORK.md) |
+| **逐项改动的实现、验证命令与板端证据** | [`edgefusion_gateway/docs/RK3576_PORT.md`](edgefusion_gateway/docs/RK3576_PORT.md) |
+| **面试自测问答卡**（自用） | [`docs/INTERVIEW_QA.md`](docs/INTERVIEW_QA.md) |
+| 上游：项目全貌、架构、模块职责 | [`PROJECT_INTRO.md`](PROJECT_INTRO.md)（上游） |
+| 上游：立项背景、硬件选型、实施计划 | [`IMX6ULL_V821_Project.md`](IMX6ULL_V821_Project.md)（上游） |
+| 上游：V821 端编译/运行/排错 | [`edgefusion_vision/README.md`](edgefusion_vision/README.md)（上游） |
+| 上游：IMX6ULL 端编译/运行/排错 | [`edgefusion_gateway/README.md`](edgefusion_gateway/README.md)（上游） |
+| 上游：网关任务书与决策点 | [`edgefusion_gateway/docs/TASK.md`](edgefusion_gateway/docs/TASK.md)（上游） |
