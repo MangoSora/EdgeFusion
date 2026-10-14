@@ -49,6 +49,7 @@ function escAttr(s) {
 
 /* ─── Navigation ─── */
 const TITLES = {
+  device: '端侧设备（MQTT）',
   live: '实时预览', recordings: '录像回放',
   events: '事件告警', settings: '系统设置'
 };
@@ -60,6 +61,7 @@ function navigate(page) {
     case 'recordings': renderRecordings(); break;
     case 'events': renderEvents(); break;
     case 'settings': renderSettings(); break;
+    case 'device': renderDevice(); break;
   }
 }
 $$('.sidebar-nav a').forEach(a => {
@@ -678,3 +680,95 @@ async function saveConfig(e) {
 (function() {
   navigate(window.location.hash.slice(1) || 'live');
 })();
+
+
+/* ─── 端侧设备（MQTT 云-边-端）─── */
+let deviceTimer = null;
+
+function mqRow(k, v) {
+  return `<tr><td style="padding:2px 12px 2px 0;color:#8b93a7">${k}</td><td style="padding:2px 0">${v}</td></tr>`;
+}
+
+async function renderDevice() {
+  const c = $('#content');
+  c.innerHTML = `
+    <div class="card" style="margin-bottom:16px">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+        <h2 style="margin:0;font-size:16px">端侧设备（MQTT）</h2>
+        <span class="muted" id="mq-summary">加载中…</span>
+      </div>
+      <div style="display:flex;gap:20px;flex-wrap:wrap;align-items:flex-start">
+        <div>
+          <img id="mq-snap" alt="端侧最新快照" style="width:360px;max-width:100%;border-radius:8px;background:#111;display:block">
+          <div class="muted" style="font-size:12px;margin-top:6px">端侧（PC 摄像头）最新快照，3 秒刷新</div>
+        </div>
+        <div>
+          <table id="mq-kv" style="border-collapse:collapse;font-size:13px"></table>
+          <div style="margin-top:12px;display:flex;gap:8px;flex-wrap:wrap">
+            <button class="btn" onclick="mqCmd('snapshot')">立即抓拍</button>
+            <button class="btn" onclick="mqCmd('pause')">暂停上报</button>
+            <button class="btn" onclick="mqCmd('resume')">恢复上报</button>
+            <button class="btn" onclick="mqCmd('set_snapshot_interval',2)">间隔 2s</button>
+            <button class="btn" onclick="mqCmd('set_snapshot_interval',5)">间隔 5s</button>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="card">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+        <h2 style="margin:0;font-size:16px">端侧事件（已写入本机事件库）</h2>
+        <span class="muted">最近 10 条</span>
+      </div>
+      <div id="mq-events">加载中…</div>
+    </div>`;
+  await refreshDevice();
+  if (deviceTimer) clearInterval(deviceTimer);
+  deviceTimer = setInterval(refreshDevice, 3000);
+}
+
+async function refreshDevice() {
+  try {
+    const s = await (await fetch('/api/status')).json();
+    const m = s.mqtt || {};
+    const sum = $('#mq-summary');
+    if (sum) sum.textContent = m.connected
+      ? `已连接 broker · 在线设备 ${m.devices_online || 0}/${m.devices_known || 0}`
+      : '未连接 broker（后台自动重连中）';
+    const kv = $('#mq-kv');
+    if (kv) kv.innerHTML =
+      mqRow('MQTT 连接', m.connected ? '正常' : '断开') +
+      mqRow('重连次数', m.reconnects || 0) +
+      mqRow('收到消息', m.rx || 0) +
+      mqRow('下发命令', m.tx || 0) +
+      mqRow('端侧事件入库', m.events_stored || 0) +
+      mqRow('端侧快照存盘', m.snapshots_saved || 0);
+    const img = $('#mq-snap');
+    if (img) img.src = '/api/mqtt/snapshot?ts=' + Date.now();
+
+    const ev = await (await fetch('/api/events')).json();
+    const list = Array.isArray(ev) ? ev : (ev.events || ev.items || []);
+    const rows = list.filter(e => String(e.event_type || '').indexOf('device_') === 0).slice(0, 10);
+    const box = $('#mq-events');
+    if (box) box.innerHTML = rows.length
+      ? rows.map(e => `<div style="padding:6px 0;border-bottom:1px solid #23262f">
+            <b>${escHtml(e.event_type)}</b> · conf=${(Number(e.confidence) || 0).toFixed(2)} · ${fmtTs(e.created_at)}
+            <div class="muted" style="font-size:12px">${escHtml(e.description || '')}</div></div>`).join('')
+      : '<div class="muted">暂无端侧事件（在摄像头前走动即可触发）</div>';
+  } catch (err) { /* 静默重试 */ }
+}
+
+async function mqCmd(cmd, value) {
+  const body = { device: 'A1', cmd };
+  if (value !== undefined) body.value = value;
+  try {
+    const r = await fetch('/api/mqtt/cmd', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    const j = await r.json();
+    toast(j.ok ? `已下发：${cmd}` : `下发失败：${j.error || '未知错误'}`, !!j.ok);
+  } catch (e) {
+    toast('下发失败：网络错误', false);
+  }
+}

@@ -728,6 +728,53 @@ static int json_get_bool(const char *json, const char *key, int *out)
     return 0;
 }
 
+/* ─── /api/mqtt/snapshot GET ─── */
+/* 返回端侧（PC 摄像头）最近一张快照，供 Web 页面显示 */
+static void serve_mqtt_snapshot(int cfd)
+{
+    char path[512];
+    if (mqtt_bridge_latest_snapshot(path, sizeof(path)) != 0) {
+        const char *e = "HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n";
+        send(cfd, e, strlen(e), 0);
+        return;
+    }
+    FILE *f = fopen(path, "rb");
+    if (!f) {
+        const char *e = "HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n";
+        send(cfd, e, strlen(e), 0);
+        return;
+    }
+    fseek(f, 0, SEEK_END);
+    long sz = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    if (sz <= 0 || sz > 4 * 1024 * 1024) {
+        fclose(f);
+        const char *e = "HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n";
+        send(cfd, e, strlen(e), 0);
+        return;
+    }
+    unsigned char *buf = malloc((size_t)sz);
+    if (!buf || fread(buf, 1, (size_t)sz, f) != (size_t)sz) {
+        free(buf); fclose(f);
+        const char *e = "HTTP/1.1 500 Internal Server Error\r\nConnection: close\r\n\r\n";
+        send(cfd, e, strlen(e), 0);
+        return;
+    }
+    fclose(f);
+    char hdr[256];
+    int n = snprintf(hdr, sizeof(hdr),
+        "HTTP/1.1 200 OK\r\nContent-Type: image/jpeg\r\nContent-Length: %ld\r\n"
+        "Cache-Control: no-store\r\nConnection: close\r\n\r\n", sz);
+    send(cfd, hdr, (size_t)n, 0);
+    size_t off = 0;
+    while (off < (size_t)sz) {
+        ssize_t w = send(cfd, buf + off, (size_t)sz - off, 0);
+        if (w <= 0) break;
+        off += (size_t)w;
+    }
+    free(buf);
+}
+
 /* ─── /api/mqtt/cmd POST ─── */
 /* 下发命令给端侧设备。请求体：{"device":"A1","cmd":"snapshot"} 或带参数
  * {"device":"A1","cmd":"set_snapshot_interval","value":3}；device 省略时默认 A1。 */
@@ -972,6 +1019,8 @@ static void handle_client_inner(int cfd)
             serve_events(cfd, query);
         } else if (!strncmp(path, "/api/event/", 11)) {
             serve_event_detail(cfd, atol(path + 11));
+        } else if (!strcmp(path, "/api/mqtt/snapshot")) {
+            serve_mqtt_snapshot(cfd);
         } else if (!strcmp(path, "/api/config")) {
             serve_config_get(cfd);
         } else if (!strncmp(path, "/stream", 7)) {

@@ -1,6 +1,7 @@
 #ifndef EDGEFUSION_MQTT_BRIDGE_H
 #define EDGEFUSION_MQTT_BRIDGE_H
 
+#include <stddef.h>
 #include <stdint.h>
 
 /* mqtt_bridge：网关（边）侧的 MQTT 桥接。
@@ -43,5 +44,8 @@ void mqtt_bridge_deinit(void);
 int  mqtt_bridge_send_cmd(const char *device_id, const char *cmd_json);
 
 void mqtt_bridge_get_stats(mqtt_bridge_stats_t *out);
+
+/* 取最近一张端侧快照的完整路径（用于 Web 展示）。成功返回 0，无快照返回 -1 */
+int  mqtt_bridge_latest_snapshot(char *out, size_t cap);
 
 #endif
