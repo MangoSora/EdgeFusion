@@ -145,14 +145,7 @@ ls -l /dev/v4l/by-id/
 5. 移动检测或 RKNN 人员检测：复用事件数据库，增加冷却/去重规则；不同时开展多个模型。
 6. systemd、磁盘写入失败恢复、长期运行及性能报告。
 
-## 面试与贡献记录
-
-每项改动保留：问题现象、代码位置、根因、修复方法、验证日志和局限。
-可介绍为“基于开源项目完成 RK3576/USB 接入和应用层改造”，明确 Web/数据库基础来自原项目。
-只有实际验证后，才在简历写“完成适配”“稳定运行 X 小时”“CPU 降低 X%”。
-本轮新增代码由助手协助编写；学习时逐步解释 V4L2 缓冲区所有权、编解码数据流、重连清理顺序和锁的作用。
-
-参考：
+## 参考资料
 - https://github.com/dshanpi/EdgeFusion_Smart_NVR
 - https://wiki.dshanpi.org/docs/DshanPi-A1/intro/
 - https://docs.kernel.org/userspace-api/media/v4l/mmap.html

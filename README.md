@@ -11,8 +11,7 @@
 | **上游提供** | 网关主框架、录像分段封装、SQLite 事件库、Web 页面、自研轻量 RTSP 服务端、V821 端侧 MPP 工程 |
 | **我做的改造** | USB(V4L2) 采集链路、MJPEG→H.264 软件编码、有界队列与线程解耦、预览直通、色彩范围缺陷修复、测试与度量工具、systemd 服务化 |
 
-- 逐项改动、验证命令与板端原始证据：**[edgefusion_gateway/docs/RK3576_PORT.md](edgefusion_gateway/docs/RK3576_PORT.md)**
-- "我做了什么 / 验证到什么程度 / 没做什么"：**[docs/MY_WORK.md](docs/MY_WORK.md)**
+- 逐项改动的实现、验证命令与板端原始证据：**[edgefusion_gateway/docs/RK3576_PORT.md](edgefusion_gateway/docs/RK3576_PORT.md)**
 
 ### 当前链路（本仓库实际形态）
 
@@ -53,7 +52,7 @@ bash scripts/run-usb.sh          # 前台运行，Ctrl+C 优雅退出
 | 60 秒性能采样 | `bash scripts/measure-run.sh 60` | CPU 均值 44.0%（峰 73%）、RSS ≤45 MB、24.80 包/秒、预览丢包 0 |
 
 > 未验证的部分（摄像头热插拔、慢客户端隔离修复、24–72h 稳定性、MPP 硬编码）在
-> [docs/MY_WORK.md](docs/MY_WORK.md) 中逐条列明，不写成已完成。
+> [RK3576 适配说明](edgefusion_gateway/docs/RK3576_PORT.md) 各节的"边界 / 验收标准"中逐条标注，不写成已完成。
 
 ---
 
@@ -216,7 +215,8 @@ curl -s http://192.168.1.59:8080/api/status    # 状态：stream/recording/cloud
 | OTA / 多路接入 / 72h 稳定性 | ⏳ 待办 |
 
 > 上表是**上游项目**在其自研硬件（V821 + IMX6ULL）上的状态，用于说明来源。
-> 本仓库在 RK3576 单板上的实际状态与验证证据见 [docs/MY_WORK.md](docs/MY_WORK.md)。
+> 本仓库在 RK3576 单板上的实际状态与验证证据见
+> [edgefusion_gateway/docs/RK3576_PORT.md](edgefusion_gateway/docs/RK3576_PORT.md)。
 
 ---
 
@@ -224,9 +224,7 @@ curl -s http://192.168.1.59:8080/api/status    # 状态：stream/recording/cloud
 
 | 想了解 | 看这里 |
 |--------|--------|
-| **我的改造清单与验证边界** | [`docs/MY_WORK.md`](docs/MY_WORK.md) |
-| **逐项改动的实现、验证命令与板端证据** | [`edgefusion_gateway/docs/RK3576_PORT.md`](edgefusion_gateway/docs/RK3576_PORT.md) |
-| **面试自测问答卡**（自用） | [`docs/INTERVIEW_QA.md`](docs/INTERVIEW_QA.md) |
+| **本项目改造说明：实现、验证命令与板端证据** | [`edgefusion_gateway/docs/RK3576_PORT.md`](edgefusion_gateway/docs/RK3576_PORT.md) |
 | 上游：项目全貌、架构、模块职责 | [`PROJECT_INTRO.md`](PROJECT_INTRO.md)（上游） |
 | 上游：立项背景、硬件选型、实施计划 | [`IMX6ULL_V821_Project.md`](IMX6ULL_V821_Project.md)（上游） |
 | 上游：V821 端编译/运行/排错 | [`edgefusion_vision/README.md`](edgefusion_vision/README.md)（上游） |
