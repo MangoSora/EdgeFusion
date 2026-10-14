@@ -3,12 +3,14 @@
 #include "event_bus.h"
 #include "log.h"
 
+#include <dirent.h>
 #include <errno.h>
 #include <json-c/json.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <time.h>
@@ -312,4 +314,43 @@ void mqtt_bridge_get_stats(mqtt_bridge_stats_t *out)
         out->tx_messages = st.tx_messages;
         out->tx_dropped = st.tx_dropped;
     }
+}
+
+/* 在快照目录下找最近修改的 .jpg（同秒多张时按文件名序号取最大） */
+int mqtt_bridge_latest_snapshot(char *out, size_t cap)
+{
+    if (!out || cap == 0 || !g_snap_dir[0]) return -1;
+    DIR *root = opendir(g_snap_dir);
+    if (!root) return -1;
+
+    char best_path[1024] = {0};
+    long long best_key = -1;
+    struct dirent *de;
+    while ((de = readdir(root)) != NULL) {
+        if (de->d_name[0] == '.') continue;
+        char devdir[512];
+        snprintf(devdir, sizeof(devdir), "%s/%.200s", g_snap_dir, de->d_name);
+        DIR *d = opendir(devdir);
+        if (!d) continue;
+        struct dirent *fe;
+        while ((fe = readdir(d)) != NULL) {
+            const char *dot = strrchr(fe->d_name, '.');
+            if (!dot || strcasecmp(dot, ".jpg") != 0) continue;
+            /* 文件名形如 <unix秒>_<序号>.jpg */
+            long long secs = atoll(fe->d_name);
+            long long seq = 0;
+            const char *us = strchr(fe->d_name, '_');
+            if (us) seq = atoll(us + 1);
+            long long key = secs * 1000 + (seq % 1000);
+            if (key > best_key) {
+                best_key = key;
+                snprintf(best_path, sizeof(best_path), "%s/%.200s", devdir, fe->d_name);
+            }
+        }
+        closedir(d);
+    }
+    closedir(root);
+    if (best_key < 0) return -1;
+    snprintf(out, cap, "%s", best_path);
+    return 0;
 }
