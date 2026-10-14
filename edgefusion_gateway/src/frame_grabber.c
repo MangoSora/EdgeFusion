@@ -127,29 +127,38 @@ void frame_grabber_deinit(void)
     pthread_mutex_unlock(&g_lock);
 }
 
-/* 处理一个已解码帧：缩放+编码JPEG+缓存（带帧率节流） */
-static void emit_jpeg_from_frame(void)
+/* 帧率节流：两条产出路径（H.264 解码 / 相机原始 JPEG）共用同一时间基准 */
+static int throttle_allow(void)
 {
     pthread_mutex_lock(&g_lock);
     int target_fps = g_cfg.target_fps;
     pthread_mutex_unlock(&g_lock);
-    if (target_fps > 0) {
-        int64_t interval = 1000000 / target_fps;
-        int64_t now = now_us();
-        if (now - g_last_emit_us < interval) {
-            return;
-        }
-        g_last_emit_us = now;
-    }
+    if (target_fps <= 0) return 1;
+    int64_t interval = 1000000 / target_fps;
+    int64_t now = now_us();
+    if (now - g_last_emit_us < interval) return 0;
+    g_last_emit_us = now;
+    return 1;
+}
 
+/* 处理一个已解码帧：缩放+编码JPEG+缓存（带帧率节流） */
+static void emit_jpeg_from_frame(void)
+{
+    if (!throttle_allow()) return;
+
+    /* 解码帧的实际范围：显式标记 JPEG=全范围；MPEG 或未标注（H.264 默认）按限范围处理。
+     * MJPEG 编码器按 YUVJ（全范围）解释数据，所以限范围来源必须显式转换——
+     * swscale 在输入输出格式相同时不会做电平转换（见 image_scale.h 说明）。 */
+    int src_full = (g_dec_frame->color_range == AVCOL_RANGE_JPEG) ? 1 : 0;
     if (image_scale_prepare(&g_sws, g_dec_frame, g_dst_w, g_dst_h,
-                            AV_PIX_FMT_YUV420P, 1) < 0) {
+                            AV_PIX_FMT_YUV420P, src_full) < 0) {
         LOG_WRN("Cannot configure JPEG preview color range");
         return;
     }
     /* 缩放 */
     sws_scale(g_sws, (const uint8_t *const *)g_dec_frame->data, g_dec_frame->linesize,
               0, g_dec_frame->height, g_dst_frame->data, g_dst_frame->linesize);
+    image_range_convert(g_dst_frame, src_full, 1);   /* 统一成 JPEG 的全范围 */
     g_dst_frame->pts = g_dec_frame->pts;
 
     /* 编码 JPEG */
@@ -169,6 +178,24 @@ static void emit_jpeg_from_frame(void)
     pthread_mutex_unlock(&g_lock);
 
     av_packet_free(&pkt);
+}
+
+/* 相机原始 MJPEG 直通：只节流 + 缓存，不做任何编解码。
+ * 与解码路径互斥使用：USB 模式用本函数，RTSP 模式用 frame_grabber_feed()。 */
+int frame_grabber_submit_jpeg(const uint8_t *data, int size)
+{
+    if (!data || size <= 0) return -1;
+    if (!throttle_allow()) return 0;      /* 被帧率节流，不是错误 */
+
+    pthread_mutex_lock(&g_lock);
+    uint8_t *nb = realloc(g_jpeg, (size_t)size);
+    if (nb) {
+        g_jpeg = nb;
+        memcpy(g_jpeg, data, (size_t)size);
+        g_jpeg_size = size;
+    }
+    pthread_mutex_unlock(&g_lock);
+    return nb ? size : -1;
 }
 
 int frame_grabber_feed(AVPacket *pkt)

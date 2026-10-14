@@ -25,6 +25,9 @@ struct usb_source {
     struct SwsContext *sws;
     int64_t first_ts, last_pts, last_frame_us;
     int64_t timeout_us;
+    /* 相机原始 MJPEG 直通回调（供预览直接取用，省掉“解码再重编码”） */
+    usb_source_jpeg_cb_t jpeg_cb;
+    void                *jpeg_cb_ctx;
 };
 
 static int xioctl(int fd, unsigned long request, void *arg)
@@ -60,6 +63,14 @@ void usb_source_close(usb_source_t *s)
     av_frame_free(&s->converted);
     sws_freeContext(s->sws);
     free(s);
+}
+
+/* 注册/取消“相机原始 JPEG”订阅者。回调在采集线程内同步执行。 */
+void usb_source_set_jpeg_cb(usb_source_t *s, usb_source_jpeg_cb_t cb, void *ctx)
+{
+    if (!s) return;
+    s->jpeg_cb = cb;
+    s->jpeg_cb_ctx = ctx;
 }
 
 usb_source_t *usb_source_open(const gateway_conf_t *cfg)
@@ -123,7 +134,9 @@ usb_source_t *usb_source_open(const gateway_conf_t *cfg)
     s->encoder->width = cfg->capture_width;
     s->encoder->height = cfg->capture_height;
     s->encoder->pix_fmt = AV_PIX_FMT_YUV420P;
-    s->encoder->color_range = AVCOL_RANGE_MPEG;
+    /* 相机给的是 JPEG，按定义即全范围（0–255）。保持全范围并如实告知编码器，
+     * 比先压到 16–235、再让播放端还原更干净（少一次有损转换）。 */
+    s->encoder->color_range = AVCOL_RANGE_JPEG;
     s->encoder->time_base = (AVRational){1, 90000};
     s->encoder->framerate = (AVRational){cfg->capture_fps, 1};
     s->encoder->bit_rate = (int64_t)cfg->video_bitrate_kbps * 1000;
@@ -141,7 +154,7 @@ usb_source_t *usb_source_open(const gateway_conf_t *cfg)
     if (ret < 0) { codec_error("open libx264 encoder", ret); goto fail; }
     if (avcodec_parameters_from_context(s->codecpar, s->encoder) < 0) goto fail;
     s->converted->format = s->encoder->pix_fmt;
-    s->converted->color_range = AVCOL_RANGE_MPEG;
+    s->converted->color_range = AVCOL_RANGE_JPEG;
     s->converted->width = s->encoder->width;
     s->converted->height = s->encoder->height;
     if (av_frame_get_buffer(s->converted, 32) < 0) goto fail;
@@ -230,6 +243,9 @@ int usb_source_read(usb_source_t *s, AVPacket *out)
     if (xioctl(s->fd, VIDIOC_QBUF, &buf) < 0) {
         ret = AVERROR(errno); av_packet_free(&jpeg); return ret;
     }
+    /* 预览直通：把手中这份 JPEG 交给订阅者（回调自行拷贝），随后照常解码 → 编码 */
+    if (s->jpeg_cb)
+        s->jpeg_cb(s->jpeg_cb_ctx, jpeg->data, (size_t)jpeg->size, capture_ts);
     ret = avcodec_send_packet(s->decoder, jpeg);
     av_packet_free(&jpeg);
     if (ret < 0) return codec_error("send MJPEG", ret);
@@ -239,8 +255,10 @@ int usb_source_read(usb_source_t *s, AVPacket *out)
     s->last_frame_us = av_gettime_relative();
     ret = av_frame_make_writable(s->converted);
     if (ret < 0) return ret;
+    /* 源是 JPEG 解码帧（全范围），目标编码器也按全范围工作 → 这里只做格式/尺寸转换，
+     * 不需要 image_range_convert()。参数含义见 image_scale.h。 */
     if (image_scale_prepare(&s->sws, s->decoded, s->encoder->width, s->encoder->height,
-                            s->encoder->pix_fmt, 0) < 0)
+                            s->encoder->pix_fmt, 1) < 0)
         return codec_error("configure color range", AVERROR(EINVAL));
     ret = sws_scale(s->sws, (const uint8_t *const *)s->decoded->data, s->decoded->linesize,
                    0, s->decoded->height, s->converted->data, s->converted->linesize);
