@@ -38,13 +38,20 @@ $(BUILD)/test_pkt_queue: tests/test_pkt_queue.c src/pkt_queue.c src/pkt_queue.h 
 $(BUILD)/test_tx_queue: tests/test_tx_queue.c src/tx_queue.c src/tx_queue.h | check-deps $(BUILD)
 	$(CC) $(CPPFLAGS) $(CFLAGS) tests/test_tx_queue.c src/tx_queue.c $(LDFLAGS) $(LDLIBS) -o $@
 
+$(BUILD)/test_mqtt_client: tests/test_mqtt_client.c src/mqtt_client.c src/mqtt_client.h src/log.c | check-deps $(BUILD)
+	$(CC) $(CPPFLAGS) $(CFLAGS) tests/test_mqtt_client.c src/mqtt_client.c src/log.c $(LDFLAGS) $(LDLIBS) -o $@
+
 test-color: $(BUILD)/test_image_scale
 	./$(BUILD)/test_image_scale
 
-test: $(BUILD)/test_recorder $(BUILD)/test_image_scale $(BUILD)/test_pkt_queue $(BUILD)/test_tx_queue
+test-mqtt: $(BUILD)/test_mqtt_client
+	./$(BUILD)/test_mqtt_client 127.0.0.1
+
+test: $(BUILD)/test_recorder $(BUILD)/test_image_scale $(BUILD)/test_pkt_queue $(BUILD)/test_tx_queue $(BUILD)/test_mqtt_client
 	./$(BUILD)/test_recorder
 	./$(BUILD)/test_image_scale
 	./$(BUILD)/test_pkt_queue
 	./$(BUILD)/test_tx_queue
+	./$(BUILD)/test_mqtt_client
 
 -include $(OBJECTS:.o=.d)
