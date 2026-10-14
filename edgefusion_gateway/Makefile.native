@@ -35,12 +35,16 @@ $(BUILD)/test_image_scale: tests/test_image_scale.c src/image_scale.h | check-de
 $(BUILD)/test_pkt_queue: tests/test_pkt_queue.c src/pkt_queue.c src/pkt_queue.h | check-deps $(BUILD)
 	$(CC) $(CPPFLAGS) $(CFLAGS) tests/test_pkt_queue.c src/pkt_queue.c $(LDFLAGS) $(LDLIBS) -o $@
 
+$(BUILD)/test_tx_queue: tests/test_tx_queue.c src/tx_queue.c src/tx_queue.h | check-deps $(BUILD)
+	$(CC) $(CPPFLAGS) $(CFLAGS) tests/test_tx_queue.c src/tx_queue.c $(LDFLAGS) $(LDLIBS) -o $@
+
 test-color: $(BUILD)/test_image_scale
 	./$(BUILD)/test_image_scale
 
-test: $(BUILD)/test_recorder $(BUILD)/test_image_scale $(BUILD)/test_pkt_queue
+test: $(BUILD)/test_recorder $(BUILD)/test_image_scale $(BUILD)/test_pkt_queue $(BUILD)/test_tx_queue
 	./$(BUILD)/test_recorder
 	./$(BUILD)/test_image_scale
 	./$(BUILD)/test_pkt_queue
+	./$(BUILD)/test_tx_queue
 
 -include $(OBJECTS:.o=.d)
