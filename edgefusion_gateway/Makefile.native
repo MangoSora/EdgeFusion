@@ -1,0 +1,42 @@
+# Native Linux build for the board (Ubuntu/Armbian). Legacy Makefile is retained.
+CC = gcc
+PKG_CONFIG ?= pkg-config
+BUILD := build-native
+TARGET := $(BUILD)/edgefusion_gateway
+PACKAGES := libavformat libavcodec libavutil libswscale libswresample libcurl openssl sqlite3 json-c
+CPPFLAGS += -D_GNU_SOURCE -D_POSIX_C_SOURCE=200809L -Isrc $(shell $(PKG_CONFIG) --cflags $(PACKAGES) 2>/dev/null)
+CFLAGS ?= -O2 -g
+CFLAGS += -std=gnu11 -Wall -Wextra -MMD -MP -pthread
+LDLIBS += $(shell $(PKG_CONFIG) --libs $(PACKAGES) 2>/dev/null) -pthread -lm -lz -ldl
+SOURCES := $(wildcard src/*.c)
+OBJECTS := $(patsubst src/%.c,$(BUILD)/%.o,$(SOURCES))
+
+.PHONY: all check-deps test test-color
+all: $(TARGET)
+
+check-deps:
+	@$(PKG_CONFIG) --print-errors --exists $(PACKAGES)
+
+$(BUILD):
+	mkdir -p $(BUILD)
+
+$(BUILD)/%.o: src/%.c | check-deps $(BUILD)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
+
+$(TARGET): $(OBJECTS)
+	$(CC) $(LDFLAGS) $(OBJECTS) $(LDLIBS) -o $@
+
+$(BUILD)/test_recorder: tests/test_recorder.c src/recorder.c src/recorder.h src/log.c src/log.h | check-deps $(BUILD)
+	$(CC) $(CPPFLAGS) $(CFLAGS) tests/test_recorder.c src/recorder.c src/log.c $(LDFLAGS) $(LDLIBS) -o $@
+
+$(BUILD)/test_image_scale: tests/test_image_scale.c src/image_scale.h | check-deps $(BUILD)
+	$(CC) $(CPPFLAGS) $(CFLAGS) tests/test_image_scale.c $(LDFLAGS) $(LDLIBS) -o $@
+
+test-color: $(BUILD)/test_image_scale
+	./$(BUILD)/test_image_scale
+
+test: $(BUILD)/test_recorder $(BUILD)/test_image_scale
+	./$(BUILD)/test_recorder
+	./$(BUILD)/test_image_scale
+
+-include $(OBJECTS:.o=.d)

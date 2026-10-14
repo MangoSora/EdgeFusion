@@ -305,6 +305,7 @@ async function renderRecordings() {
         <h3>录像文件</h3>
         <span class="rec-dur" id="rec-summary"></span>
       </div>
+      <p class="muted" style="margin:12px 16px">录像自动保存在设备中，无需手动保存。点击“播放”回放，或“下载”保存到电脑。停止网关也会停止网页服务；重新启动后可继续访问保留的录像。</p>
       <div class="card-body" style="padding:0">
         <div class="tbl-wrap">
           <table class="tbl" id="rec-table">

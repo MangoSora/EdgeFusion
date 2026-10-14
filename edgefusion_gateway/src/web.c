@@ -253,6 +253,9 @@ static void serve_status(int cfd)
             ss.width, ss.height, ss.fps,
             ss.recording ? "true" : "false",
             ss.cur_segment, ss.bitrate_kbps);
+        off += snprintf(json + off, sizeof(json) - off,
+            ",\"source_type\":\"%s\",\"frames\":%llu,\"reconnects\":%u",
+            ss.source_type, ss.frames, ss.reconnects);
     } else {
         off += snprintf(json + off, sizeof(json) - off,
             "\"connected\":false");

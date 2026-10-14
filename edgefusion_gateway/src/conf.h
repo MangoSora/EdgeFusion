@@ -4,6 +4,15 @@
 #include <stddef.h>
 
 typedef struct {
+    /* Input selection: rtsp (legacy default) or v4l2 (MJPEG USB camera).
+     * These fields require a restart; v4l2 baseline uses libx264 software encoding. */
+    char  source_type[16];
+    char  video_device[256];
+    int   capture_width;
+    int   capture_height;
+    int   capture_fps;
+    int   video_bitrate_kbps;
+
     /* RTSP */
     char  rtsp_url[256];
     char  rtsp_sub_url[256];

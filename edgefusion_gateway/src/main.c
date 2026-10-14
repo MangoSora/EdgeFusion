@@ -74,7 +74,7 @@ static void on_signal(int sig)
 static void usage(const char *prog)
 {
     fprintf(stderr,
-        "EdgeFusion Gateway (IMX6ULL AI NVR 核心)\n"
+        "EdgeFusion Gateway (RTSP / RK3576 USB video)\n"
         "用法: %s -path <config>\n"
         "  -path <config>  配置文件路径 (默认 /mnt/extsd/gateway/config/gateway.conf)\n"
         "  -h              显示帮助\n",
@@ -121,7 +121,7 @@ int main(int argc, char *argv[])
     /* 忽略 SIGPIPE（curl/socket 写断链） */
     signal(SIGPIPE, SIG_IGN);
 
-    LOG_INF("EdgeFusion Gateway 已启动 (本地数据管理云 + DeepSeek 检测)");
+    LOG_INF("EdgeFusion Gateway 已启动 (录像 / Web / 可选云端分析)");
 
     /* 快照目录派生自 storage_dir 同级（避免改 conf） */
     char snapshot_dir[512];
@@ -143,7 +143,7 @@ int main(int argc, char *argv[])
         return 1;
     }
 
-    /* 启动 DeepSeek 检测线程（消费 frame_grabber，token 空则纯本地模式） */
+    /* 启动可选云端分析线程（消费 frame_grabber） */
     if (cloud_ai_start(&cfg) != 0) {
         LOG_WRN("cloud_ai 启动失败（检测不可用，不影响录像/预览）");
     }

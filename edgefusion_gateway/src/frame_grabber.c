@@ -1,5 +1,6 @@
 #include "frame_grabber.h"
 #include "log.h"
+#include "image_scale.h"
 
 #include "libavcodec/avcodec.h"
 #include "libavutil/imgutils.h"
@@ -37,7 +38,10 @@ static int64_t now_us(void)
 
 int frame_grabber_init(const frame_grabber_cfg_t *cfg, AVCodecParameters *codecpar)
 {
+    pthread_mutex_lock(&g_lock);
     g_cfg = *cfg;
+    pthread_mutex_unlock(&g_lock);
+    g_last_emit_us = 0;
 
     /* 解码器 */
     const AVCodec *dec = avcodec_find_decoder(codecpar->codec_id);
@@ -66,9 +70,11 @@ int frame_grabber_init(const frame_grabber_cfg_t *cfg, AVCodecParameters *codecp
     const AVCodec *enc = avcodec_find_encoder(AV_CODEC_ID_MJPEG);
     if (!enc) { LOG_ERR("找不到 MJPEG 编码器"); goto fail; }
     g_enc = avcodec_alloc_context3(enc);
+    if (!g_enc) goto fail;
     g_enc->width = g_dst_w;
     g_enc->height = g_dst_h;
     g_enc->pix_fmt = AV_PIX_FMT_YUVJ420P;
+    g_enc->color_range = AVCOL_RANGE_JPEG;
     g_enc->time_base = (AVRational){1, 25};
     /* JPEG 质量通过 qmin/qmax 控制（取值 1-31，越小质量越高；映射 quality->qscale） */
     int qscale = 31 - (cfg->jpeg_quality * 30 / 100);
@@ -84,11 +90,8 @@ int frame_grabber_init(const frame_grabber_cfg_t *cfg, AVCodecParameters *codecp
     }
     av_dict_free(&opts);
 
-    /* 缩放器：解码帧 pix_fmt -> YUVJ420P 目标尺寸 */
-    g_sws = sws_getContext(codecpar->width, codecpar->height, g_dec->pix_fmt,
-                           g_dst_w, g_dst_h, AV_PIX_FMT_YUVJ420P,
-                           SWS_FAST_BILINEAR, NULL, NULL, NULL);
-    if (!g_sws) { LOG_ERR("sws_getContext 失败"); goto fail; }
+    /* Decoder pixel format may be unknown before the first frame.
+     * Initialize/reconfigure swscale from the decoded frame in emit_jpeg. */
 
     /* 给目标帧分配 buffer */
     if (av_image_alloc(g_dst_frame->data, g_dst_frame->linesize,
@@ -98,6 +101,7 @@ int frame_grabber_init(const frame_grabber_cfg_t *cfg, AVCodecParameters *codecp
     g_dst_frame->width = g_dst_w;
     g_dst_frame->height = g_dst_h;
     g_dst_frame->format = AV_PIX_FMT_YUVJ420P;
+    g_dst_frame->color_range = AVCOL_RANGE_JPEG;
 
     LOG_INF("frame_grabber 就绪: %dx%d -> %dx%d JPEG q=%d fps=%d",
             codecpar->width, codecpar->height, g_dst_w, g_dst_h, cfg->jpeg_quality, cfg->target_fps);
@@ -126,9 +130,11 @@ void frame_grabber_deinit(void)
 /* 处理一个已解码帧：缩放+编码JPEG+缓存（带帧率节流） */
 static void emit_jpeg_from_frame(void)
 {
-    /* 帧率节流 */
-    if (g_cfg.target_fps > 0) {
-        int64_t interval = 1000000 / g_cfg.target_fps;
+    pthread_mutex_lock(&g_lock);
+    int target_fps = g_cfg.target_fps;
+    pthread_mutex_unlock(&g_lock);
+    if (target_fps > 0) {
+        int64_t interval = 1000000 / target_fps;
         int64_t now = now_us();
         if (now - g_last_emit_us < interval) {
             return;
@@ -136,6 +142,11 @@ static void emit_jpeg_from_frame(void)
         g_last_emit_us = now;
     }
 
+    if (image_scale_prepare(&g_sws, g_dec_frame, g_dst_w, g_dst_h,
+                            AV_PIX_FMT_YUV420P, 1) < 0) {
+        LOG_WRN("Cannot configure JPEG preview color range");
+        return;
+    }
     /* 缩放 */
     sws_scale(g_sws, (const uint8_t *const *)g_dec_frame->data, g_dec_frame->linesize,
               0, g_dec_frame->height, g_dst_frame->data, g_dst_frame->linesize);
@@ -179,6 +190,8 @@ int frame_grabber_feed(AVPacket *pkt)
 
 int frame_grabber_get_jpeg(uint8_t **out_data)
 {
+    if (!out_data) return 0;
+    *out_data = NULL;
     pthread_mutex_lock(&g_lock);
     if (!g_jpeg || g_jpeg_size <= 0) {
         pthread_mutex_unlock(&g_lock);
@@ -190,10 +203,11 @@ int frame_grabber_get_jpeg(uint8_t **out_data)
         pthread_mutex_unlock(&g_lock);
         return 0;
     }
-    memcpy(buf, g_jpeg, g_jpeg_size);
+    int size = g_jpeg_size;
+    memcpy(buf, g_jpeg, size);
     pthread_mutex_unlock(&g_lock);
     *out_data = buf;
-    return g_jpeg_size;
+    return size;
 }
 
 void frame_grabber_set_target_fps(int fps)

@@ -19,10 +19,10 @@ typedef struct recorder recorder_t;
 recorder_t *recorder_create(const recorder_cfg_t *cfg, AVCodecParameters *stream_codecpar);
 void        recorder_destroy(recorder_t *r);
 
-/* 写一帧 packet。ts 为该帧时间戳(秒,用于分段)。
- * 返回 0 成功；首帧非关键帧时内部缓存直到关键帧。
+/* 写一帧 packet。source_time_base 为输入 packet 的实际时间基。
+ * 返回 0 成功；首帧非关键帧时丢弃，直到关键帧。
  * is_key: 该帧是否关键帧(IDR) */
-int recorder_write_packet(recorder_t *r, AVPacket *pkt, int is_key, double ts);
+int recorder_write_packet(recorder_t *r, AVPacket *pkt, int is_key, AVRational source_time_base);
 
 /* 录像运行状态快照（供 Web /api/status 聚合） */
 typedef struct {
