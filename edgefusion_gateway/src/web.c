@@ -5,6 +5,9 @@
 #include "event_bus.h"
 #include "stream_receiver.h"
 #include "rtsp_server.h"
+#include "mqtt_bridge.h"
+
+#include <json-c/json.h>
 #include "cloud_ai.h"
 
 #include <arpa/inet.h>
@@ -272,6 +275,19 @@ static void serve_status(int cfd)
     off += snprintf(json + off, sizeof(json) - off,
         ",\"rtsp_server\":{\"clients\":%d,\"slow_clients\":%d,\"max_queued_kb\":%d}",
         rtsp_clients, rtsp_server_slow_count(), rtsp_server_max_queued_kb());
+
+    /* MQTT 桥接（云-边-端：端侧设备接入） */
+    mqtt_bridge_stats_t mb;
+    mqtt_bridge_get_stats(&mb);
+    off += snprintf(json + off, sizeof(json) - off,
+        ",\"mqtt\":{\"running\":%s,\"connected\":%s,\"reconnects\":%d,"
+        "\"rx\":%llu,\"tx\":%llu,\"tx_dropped\":%llu,"
+        "\"devices_online\":%d,\"devices_known\":%d,"
+        "\"events_stored\":%llu,\"snapshots_saved\":%llu,\"last_event_ts\":%ld}",
+        mb.running ? "true" : "false", mb.connected ? "true" : "false", mb.reconnects,
+        mb.rx_messages, mb.tx_messages, mb.tx_dropped,
+        mb.devices_online, mb.devices_known,
+        mb.events_stored, mb.snapshots_saved, mb.last_event_ts);
 
     /* cloud_ai */
     off += snprintf(json + off, sizeof(json) - off,
@@ -712,6 +728,57 @@ static int json_get_bool(const char *json, const char *key, int *out)
     return 0;
 }
 
+/* ─── /api/mqtt/cmd POST ─── */
+/* 下发命令给端侧设备。请求体：{"device":"A1","cmd":"snapshot"} 或带参数
+ * {"device":"A1","cmd":"set_snapshot_interval","value":3}；device 省略时默认 A1。 */
+static void serve_mqtt_cmd(int cfd, const char *body, int body_len)
+{
+    if (!body || body_len <= 0) {
+        const char *e = "{\"ok\":false,\"error\":\"empty body\"}";
+        send_json(cfd, 400, e, (int)strlen(e));
+        return;
+    }
+    struct json_object *root = json_tokener_parse(body);
+    if (!root) {
+        const char *e = "{\"ok\":false,\"error\":\"invalid json\"}";
+        send_json(cfd, 400, e, (int)strlen(e));
+        return;
+    }
+    struct json_object *jdev = NULL, *jcmd = NULL, *jval = NULL;
+    json_object_object_get_ex(root, "device", &jdev);
+    json_object_object_get_ex(root, "cmd", &jcmd);
+    json_object_object_get_ex(root, "value", &jval);
+    if (!jcmd) {
+        json_object_put(root);
+        const char *e = "{\"ok\":false,\"error\":\"missing cmd\"}";
+        send_json(cfd, 400, e, (int)strlen(e));
+        return;
+    }
+    const char *device = jdev ? json_object_get_string(jdev) : "A1";
+    const char *cmd = json_object_get_string(jcmd);
+
+    char cmd_json[192];
+    if (jval) {
+        /* 用 json-c 的序列化结果拼参数：数字保持数字、字符串保持带引号，
+         * 避免依赖 enum json_type（该枚举未必在当前包含路径下可见） */
+        snprintf(cmd_json, sizeof(cmd_json), "{\"cmd\":\"%s\",\"value\":%s}",
+                 cmd, json_object_to_json_string(jval));
+    } else {
+        snprintf(cmd_json, sizeof(cmd_json), "{\"cmd\":\"%s\"}", cmd);
+    }
+
+    int rc = mqtt_bridge_send_cmd(device, cmd_json);
+    char resp[256];
+    if (rc == 0)
+        snprintf(resp, sizeof(resp), "{\"ok\":true,\"device\":\"%s\",\"sent\":\"%s\"}",
+                 device, cmd_json);
+    else
+        snprintf(resp, sizeof(resp),
+                 "{\"ok\":false,\"device\":\"%s\",\"error\":\"mqtt not connected\"}", device);
+    json_object_put(root);
+    send_json(cfd, rc == 0 ? 200 : 503, resp, (int)strlen(resp));
+}
+
 /* ─── /api/config POST ─── */
 static void serve_config_post(int cfd, const char *body, int body_len)
 {
@@ -920,6 +987,8 @@ static void handle_client_inner(int cfd)
     } else if (!strcmp(method, "POST")) {
         if (!strcmp(path, "/api/config")) {
             serve_config_post(cfd, post_body, post_len);
+        } else if (!strcmp(path, "/api/mqtt/cmd")) {
+            serve_mqtt_cmd(cfd, post_body, post_len);
         } else {
             const char *e = "HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n";
             send(cfd, e, strlen(e), 0);
