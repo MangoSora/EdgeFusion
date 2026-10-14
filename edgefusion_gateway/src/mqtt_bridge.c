@@ -40,6 +40,8 @@ static unsigned long long g_events_stored;
 static unsigned long long g_snapshots_saved;
 static long               g_last_event_ts;
 static char               g_last_event_device[32];
+static char               g_stream_url[160];
+static int                g_device_paused;
 
 /* 最近一张端侧快照：用于给同设备、时间相近的事件附缩略图 */
 static pthread_mutex_t  g_snap_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -87,6 +89,18 @@ static void handle_status(const char *dev, const uint8_t *payload, size_t len)
         struct json_object *o = NULL;
         if (json_object_object_get_ex(root, "online", &o))
             online = json_object_get_boolean(o) ? 1 : 0;
+        if (json_object_object_get_ex(root, "paused", &o)) {
+            int p = json_object_get_boolean(o) ? 1 : 0;
+            if (p != g_device_paused) LOG_INF("mqtt 端侧上报状态: %s", p ? "已暂停" : "已恢复");
+            g_device_paused = p;
+        }
+        if (json_object_object_get_ex(root, "stream", &o) && json_object_get_string(o)) {
+            const char *u = json_object_get_string(o);
+            if (strcmp(u, g_stream_url) != 0) {
+                snprintf(g_stream_url, sizeof(g_stream_url), "%s", u);
+                LOG_INF("mqtt 端侧视频流地址: %s", g_stream_url);
+            }
+        }
         json_object_put(root);
     }
     device_state_t *d = device_get(dev);
@@ -299,6 +313,8 @@ void mqtt_bridge_get_stats(mqtt_bridge_stats_t *out)
     out->snapshots_saved = g_snapshots_saved;
     out->last_event_ts = g_last_event_ts;
     snprintf(out->last_event_device, sizeof(out->last_event_device), "%s", g_last_event_device);
+    snprintf(out->stream_url, sizeof(out->stream_url), "%s", g_stream_url);
+    out->device_paused = g_device_paused;
 
     int online = 0;
     for (int i = 0; i < g_device_count; ++i)

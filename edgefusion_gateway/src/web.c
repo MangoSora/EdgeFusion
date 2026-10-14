@@ -283,11 +283,13 @@ static void serve_status(int cfd)
         ",\"mqtt\":{\"running\":%s,\"connected\":%s,\"reconnects\":%d,"
         "\"rx\":%llu,\"tx\":%llu,\"tx_dropped\":%llu,"
         "\"devices_online\":%d,\"devices_known\":%d,"
-        "\"events_stored\":%llu,\"snapshots_saved\":%llu,\"last_event_ts\":%ld}",
+        "\"events_stored\":%llu,\"snapshots_saved\":%llu,\"last_event_ts\":%ld,"
+        "\"stream_url\":\"%s\",\"device_paused\":%s}",
         mb.running ? "true" : "false", mb.connected ? "true" : "false", mb.reconnects,
         mb.rx_messages, mb.tx_messages, mb.tx_dropped,
         mb.devices_online, mb.devices_known,
-        mb.events_stored, mb.snapshots_saved, mb.last_event_ts);
+        mb.events_stored, mb.snapshots_saved, mb.last_event_ts, mb.stream_url,
+        mb.device_paused ? "true" : "false");
 
     /* cloud_ai */
     off += snprintf(json + off, sizeof(json) - off,

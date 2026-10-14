@@ -684,6 +684,9 @@ async function saveConfig(e) {
 
 /* ─── 端侧设备（MQTT 云-边-端）─── */
 let deviceTimer = null;
+let mqCmdLog = [];
+let mqLastSnapCount = null;
+let mqLastSnapChange = 0;
 
 function mqRow(k, v) {
   return `<tr><td style="padding:2px 12px 2px 0;color:#8b93a7">${k}</td><td style="padding:2px 0">${v}</td></tr>`;
@@ -699,11 +702,17 @@ async function renderDevice() {
       </div>
       <div style="display:flex;gap:20px;flex-wrap:wrap;align-items:flex-start">
         <div>
-          <img id="mq-snap" alt="端侧最新快照" style="width:360px;max-width:100%;border-radius:8px;background:#111;display:block">
-          <div class="muted" style="font-size:12px;margin-top:6px">端侧（PC 摄像头）最新快照，3 秒刷新</div>
+          <img id="mq-live" alt="端侧实时视频流" style="width:420px;max-width:100%;border-radius:8px;background:#111;display:block">
+          <div class="muted" style="font-size:12px;margin-top:6px">
+            端侧实时视频（HTTP MJPEG，约 12fps）——视频走 HTTP，控制/事件走 MQTT
+          </div>
+          <img id="mq-snap" alt="端侧最新抓拍" style="width:210px;margin-top:10px;border-radius:8px;background:#111;display:block">
+          <div class="muted" style="font-size:12px;margin-top:4px">最近一次抓拍快照（点「立即抓拍」更新）</div>
         </div>
         <div>
           <table id="mq-kv" style="border-collapse:collapse;font-size:13px"></table>
+          <div class="muted" style="font-size:12px;margin:8px 0 0">上报状态：<b id="mq-report">未知</b></div>
+          <div id="mq-cmdlog" style="margin-top:10px;font-size:12px;max-height:120px;overflow:auto"></div>
           <div style="margin-top:12px;display:flex;gap:8px;flex-wrap:wrap">
             <button class="btn" onclick="mqCmd('snapshot')">立即抓拍</button>
             <button class="btn" onclick="mqCmd('pause')">暂停上报</button>
@@ -744,6 +753,30 @@ async function refreshDevice() {
       mqRow('端侧快照存盘', m.snapshots_saved || 0);
     const img = $('#mq-snap');
     if (img) img.src = '/api/mqtt/snapshot?ts=' + Date.now();
+    const live = $('#mq-live');
+    if (live && m.stream_url && live.getAttribute('src') !== m.stream_url) {
+      live.setAttribute('src', m.stream_url);
+      live.setAttribute('title', m.stream_url);
+    }
+    if (live && !m.stream_url) live.setAttribute('alt', '端侧未上报视频流地址');
+
+    /* 上报状态：靠"快照计数是否在增长"判断（暂停/恢复都能看出来） */
+    const rep = $('#mq-report');
+    const now = Date.now();
+    if (m.snapshots_saved !== mqLastSnapCount) { mqLastSnapCount = m.snapshots_saved; mqLastSnapChange = now; }
+    if (rep) {
+      if (!m.connected) rep.textContent = 'MQTT 未连接（后台重连中）';
+      else if (m.device_paused) rep.textContent = '⏸ 已暂停（端侧确认）';
+      else if (now - mqLastSnapChange < 12000) rep.textContent = '● 活跃（端侧正在上报）';
+      else rep.textContent = '无新数据（端侧可能已停止上报）';
+    }
+    /* 暂停时把视频变暗，直观可见 */
+    if (live) live.style.opacity = m.device_paused ? '0.35' : '1';
+    const logbox = $('#mq-cmdlog');
+    if (logbox) logbox.innerHTML = mqCmdLog.length
+      ? '<b>命令记录</b><div class="muted" style="font-size:11px">（端侧的确认见"上报状态"与左侧画面）</div>'
+        + mqCmdLog.map(x => `<div style="padding:3px 0;border-bottom:1px solid #23262f;color:${x.includes('❌') ? '#ff7b72' : '#7ee787'}">${x}</div>`).join('')
+      : '<b>命令记录</b><div class="muted">点上面的按钮试试</div>';
 
     const ev = await (await fetch('/api/events')).json();
     const list = Array.isArray(ev) ? ev : (ev.events || ev.items || []);
@@ -767,7 +800,13 @@ async function mqCmd(cmd, value) {
       body: JSON.stringify(body),
     });
     const j = await r.json();
-    toast(j.ok ? `已下发：${cmd}` : `下发失败：${j.error || '未知错误'}`, !!j.ok);
+    const t = new Date().toLocaleTimeString();
+    mqCmdLog.unshift(`${t} · ${cmd}${value !== undefined ? '(' + value + ')' : ''} → ` + (j.ok ? '✅ 已下发' : '❌ ' + (j.error || '失败')));
+    mqCmdLog = mqCmdLog.slice(0, 8);
+    toast(j.ok ? `已下发：${cmd}（端侧确认后"上报状态"会变化）` : `下发失败：${j.error || '未知错误'}`, !!j.ok);
+    refreshDevice();
+    setTimeout(refreshDevice, 1500);   /* 端侧执行 + 回传状态需要一点时间，补刷一次 */
+    setTimeout(refreshDevice, 4000);
   } catch (e) {
     toast('下发失败：网络错误', false);
   }
