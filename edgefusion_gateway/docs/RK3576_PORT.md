@@ -417,7 +417,7 @@ REPRODUCED: /api/status 从 0.020s 恶化到 2.003s （102x）
 局限：模拟网关只复刻了“发送阻塞连带拖慢状态接口”这一条因果链，**不能替代真机复现**；
 板端仍须在 `rtsp_server_enable = 1` 下运行 `scripts/slow-rtsp-client.py` 并记录结果。
 
-## 改动四：systemd 服务化与长期采样（待板端验证）
+## 改动四：systemd 服务化与长期采样（已板端验证）
 
 ### 问题
 
@@ -461,6 +461,22 @@ bash scripts/install-service.sh --uninstall
    平均帧率、预览丢包与重连次数，形成表格后再回填本文档。
 
 说明：本节的文件与流程已就绪，但**尚未在开发板上执行过**，各项结论以待板端结果为准。
+
+### 板端结果（已逐项验证）
+
+安装：`bash scripts/install-service.sh`（替换 `@USER@`/`@DIR@` 后写入 `/etc/systemd/system/`，
+`daemon-reload` + `enable --now`）
+
+| 检查 | 结果 |
+|---|---|
+| 安装与启用 | `Loaded: ...; enabled; preset: enabled`、`Active: active (running)`、9 线程、13.6 MB |
+| 服务在干活 | 状态接口 `recording:true`、`frames` 持续增长；日志有启动横幅与 `新录像段` |
+| **优雅退出** | `systemctl stop` 返回 **0.07 s**、`inactive`、**无残留进程**；日志顺序为 `event_bus 已关闭` → `已退出，再见` → `Deactivated successfully`（说明是正常收尾而非被强杀） |
+| **崩溃自动重启** | `pkill -9` 主进程后 8 秒内 `is-active` 回到 `active`；录像段出现新文件（时间戳与重启时刻吻合） |
+| **开机自启** | 重启板子后自动 `active`，并自动开始新录像段（`rec_20261015_000835_...`） |
+| 停机后文件完整性 | 最后一段 `ffprobe` 可读出 `duration=4.549322`，即 `stop` 时 MP4 trailer 写完整 |
+
+未验证：`scripts/monitor-run.sh` 的 24–72 小时长期采样（脚本就绪，未跑长时）。
 
 ## 改动五：RTSP 客户端并发与发送隔离
 
