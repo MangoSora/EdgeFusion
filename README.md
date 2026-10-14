@@ -1,5 +1,7 @@
 # EdgeFusion — 云端协同智能 NVR
 
+> **RK3576 / USB 适配开发中**：新增 DshanPi-A1（Ubuntu 24.04 Armbian）USB MJPEG → 软件 H.264 → 原网关录像/Web 的首版代码。构建、验证与改造边界见 [RK3576 适配说明](edgefusion_gateway/docs/RK3576_PORT.md)。下文保留上游 V821 + IMX6ULL 架构说明，不代表当前板端验证结果。
+
 基于 **V821（端）+ IMX6ULL（边）+ 云端大模型（云）** 三层架构的智能网络视频录像机。V821 无线采集 H.264 推流，IMX6ULL 拉流录像并提取关键帧上云做视觉分析，低成本实现「会思考」的 NVR。
 
 ```

@@ -32,11 +32,15 @@ $(BUILD)/test_recorder: tests/test_recorder.c src/recorder.c src/recorder.h src/
 $(BUILD)/test_image_scale: tests/test_image_scale.c src/image_scale.h | check-deps $(BUILD)
 	$(CC) $(CPPFLAGS) $(CFLAGS) tests/test_image_scale.c $(LDFLAGS) $(LDLIBS) -o $@
 
+$(BUILD)/test_pkt_queue: tests/test_pkt_queue.c src/pkt_queue.c src/pkt_queue.h | check-deps $(BUILD)
+	$(CC) $(CPPFLAGS) $(CFLAGS) tests/test_pkt_queue.c src/pkt_queue.c $(LDFLAGS) $(LDLIBS) -o $@
+
 test-color: $(BUILD)/test_image_scale
 	./$(BUILD)/test_image_scale
 
-test: $(BUILD)/test_recorder $(BUILD)/test_image_scale
+test: $(BUILD)/test_recorder $(BUILD)/test_image_scale $(BUILD)/test_pkt_queue
 	./$(BUILD)/test_recorder
 	./$(BUILD)/test_image_scale
+	./$(BUILD)/test_pkt_queue
 
 -include $(OBJECTS:.o=.d)
