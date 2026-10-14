@@ -167,6 +167,8 @@ typedef struct client {
     uint32_t           ts_base;
     /* 发送路径：推流线程只入队，本客户端的连接线程负责排空 */
     tx_queue_t        *tx;
+    unsigned int       overflows_seen;  /* 上次观察到的溢出次数 */
+    int64_t            lag_since_ms;    /* 积压持续超阈值的起点，0=正常 */
     struct client     *next;
 } client_t;
 
@@ -176,6 +178,8 @@ static int            g_listen_fd = -1;
 static pthread_t      g_tid;
 static atomic_int   g_running = 0;
 static atomic_int   g_client_threads = 0;   /* 活跃客户端线程数（停止时等待归零） */
+static atomic_int   g_slow_evicted = 0;     /* 累计踢出的慢客户端数 */
+static atomic_int   g_max_queued_kb = 0;    /* 观测到的最大单客户端积压(KB) */
 static char           g_sdp[1024];
 static int            g_sdp_len;
 
@@ -374,6 +378,25 @@ static int client_drain(client_t *c)
     }
 }
 
+/* 慢客户端判定：积压超过队列一半、或溢出次数在增长，且持续超过 RTSP_CLIENT_LAG_MS。
+ * 顺带记录观测到的最大积压，供 /api/status 展示。 */
+static int client_is_lagging(client_t *c)
+{
+    if (!c->tx) return 0;
+    tx_queue_stats_t st;
+    tx_queue_get_stats(c->tx, &st);
+    int kb = (int)(st.pending / 1024);
+    int cur = atomic_load(&g_max_queued_kb);
+    while (kb > cur && !atomic_compare_exchange_weak(&g_max_queued_kb, &cur, kb)) { }
+
+    if (st.pending > RTSP_TX_QUEUE_BYTES / 2 || st.overflows > c->overflows_seen) {
+        c->overflows_seen = st.overflows;
+        if (c->lag_since_ms == 0) c->lag_since_ms = now_ms();
+        return (now_ms() - c->lag_since_ms) > RTSP_CLIENT_LAG_MS;
+    }
+    c->lag_since_ms = 0;
+    return 0;
+}
 
 static void close_client(client_t *c)
 {
@@ -423,6 +446,11 @@ static void *client_thread(void *arg)
         if (ready > 0) {
             if (pfd.revents & (POLLERR | POLLHUP | POLLNVAL)) break;
             if ((pfd.revents & (POLLOUT | POLLIN)) && client_drain(c) < 0) break;
+        }
+        if (c->playing && client_is_lagging(c)) {
+            atomic_fetch_add(&g_slow_evicted, 1);
+            LOG_WRN("rtsp 慢客户端 session=%u 发送队列持续排不空，断开", c->session_id);
+            break;
         }
         if (ready <= 0 || !(pfd.revents & POLLIN)) continue;
         ssize_t n = recv(cfd, buf, sizeof(buf) - 1, 0);
