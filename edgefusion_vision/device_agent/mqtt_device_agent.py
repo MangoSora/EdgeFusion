@@ -18,13 +18,46 @@
     python mqtt_device_agent.py --broker 192.168.137.2 --camera 0 --snapshot-interval 3
 """
 import argparse
+import http.server
 import json
+import socket
 import sys
+import threading
 import time
 
 import cv2
 import numpy as np
 import paho.mqtt.client as mqtt
+
+
+
+class _MjpegHandler(http.server.BaseHTTPRequestHandler):
+    """把最新一帧以 multipart/x-mixed-replace 推给浏览器 → 网页里就是流畅视频。
+    视频走 HTTP，MQTT 只承载控制/事件/快照（与设计文档一致）。"""
+    agent = None
+
+    def do_GET(self):                                  # noqa: N802
+        if self.path not in ("/stream", "/"):
+            self.send_error(404)
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", "multipart/x-mixed-replace; boundary=frame")
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        try:
+            while True:
+                jpg = self.agent.latest_jpg()
+                if jpg:
+                    self.wfile.write(b"--frame\r\nContent-Type: image/jpeg\r\nContent-Length: "
+                                     + str(len(jpg)).encode() + b"\r\n\r\n")
+                    self.wfile.write(jpg)
+                    self.wfile.write(b"\r\n")
+                time.sleep(0.08)                       # ~12 fps
+        except (BrokenPipeError, ConnectionResetError, AttributeError):
+            pass
+
+    def log_message(self, *args):                      # 静音访问日志
+        pass
 
 
 class DeviceAgent:
@@ -60,6 +93,32 @@ class DeviceAgent:
         self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, args.width)
         self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, args.height)
         self.background = None
+        self._jpg = None
+        self._jpg_lock = threading.Lock()
+        self.host_ip = self._detect_ip(args.broker)
+        self.stream_url = f"http://{self.host_ip}:{args.http_port}/stream"
+
+
+    def _detect_ip(self, broker):
+        """取"能到达 broker 的那块网卡"的 IP，避免主机名解析取错地址"""
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.connect((broker, 1883))
+            ip = s.getsockname()[0]
+            s.close()
+            return ip
+        except OSError:
+            return "127.0.0.1"
+
+    def latest_jpg(self):
+        with self._jpg_lock:
+            return self._jpg
+
+    def start_http(self):
+        handler = type("MjpegHandler", (_MjpegHandler,), {"agent": self})
+        self.httpd = http.server.ThreadingHTTPServer(("0.0.0.0", self.args.http_port), handler)
+        threading.Thread(target=self.httpd.serve_forever, daemon=True).start()
+        print(f"[agent] 视频流已启动: {self.stream_url}")
 
     # ---------- MQTT 回调 ----------
     def on_connect(self, client, userdata, flags, reason_code, properties=None):
@@ -104,6 +163,7 @@ class DeviceAgent:
             "height": int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT)),
             "fps": self.args.report_fps,
             "paused": self.paused,
+            "stream": self.stream_url,
             **self.stats,
         }
         self.client.publish(f"{self.prefix}/status", json.dumps(payload), qos=0, retain=True)
@@ -140,6 +200,7 @@ class DeviceAgent:
 
     # ---------- 主循环 ----------
     def run(self):
+        self.start_http()
         self.client.connect(self.args.broker, self.args.port, keepalive=15)
         self.client.loop_start()
 
@@ -153,6 +214,12 @@ class DeviceAgent:
                     time.sleep(0.2)
                     continue
                 frames += 1
+                okj, live = cv2.imencode(".jpg", cv2.resize(frame, (self.args.stream_width,
+                          int(frame.shape[0] * self.args.stream_width / frame.shape[1]))),
+                          [cv2.IMWRITE_JPEG_QUALITY, 60])
+                if okj:
+                    with self._jpg_lock:
+                        self._jpg = live.tobytes()
 
                 if not self.paused:
                     small = cv2.cvtColor(cv2.resize(frame, (160, 120)), cv2.COLOR_BGR2GRAY)
@@ -189,6 +256,8 @@ class DeviceAgent:
             self.client.loop_stop()
             self.client.disconnect()
             self.cap.release()
+            if getattr(self, 'httpd', None):
+                self.httpd.shutdown()
             print(f"[agent] 已退出，统计: {self.stats}")
 
 
@@ -201,6 +270,8 @@ def main():
     p.add_argument("--width", type=int, default=1280)
     p.add_argument("--height", type=int, default=720)
     p.add_argument("--snapshot-width", type=int, default=640)
+    p.add_argument("--stream-width", type=int, default=640, help="视频流宽度")
+    p.add_argument("--http-port", type=int, default=8081, help="MJPEG 视频流端口")
     p.add_argument("--snapshot-interval", type=float, default=5.0, help="快照间隔秒")
     p.add_argument("--status-interval", type=float, default=5.0, help="心跳间隔秒")
     p.add_argument("--motion-ratio", type=float, default=0.01, help="移动检测阈值(像素占比)")
