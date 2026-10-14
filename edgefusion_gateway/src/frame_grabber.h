@@ -24,6 +24,12 @@ void frame_grabber_deinit(void);
  * 返回 0 正常。pkt 不会被修改，调用者仍负责 unref。 */
 int  frame_grabber_feed(AVPacket *pkt);
 
+/* USB 摄像头直接输出 MJPEG 时走这条路径：只做帧率节流与缓存，既不解码也不重编码，
+ * 省掉“编码成 H.264 再解码回 JPEG”的重复开销。
+ * 预览分辨率即摄像头采集分辨率（不再套用 out_width 缩放）。
+ * 返回缓存后的字节数；被节流时返回 0（不算失败）；参数非法返回 -1。 */
+int  frame_grabber_submit_jpeg(const uint8_t *data, int size);
+
 /* 取最新 JPEG 帧的拷贝。返回帧大小(字节)，0=暂无帧。
  * 调用者用完需 free(*out_data)。
  * 线程安全：内部加锁拷贝。 */
