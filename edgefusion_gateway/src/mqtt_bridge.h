@@ -31,6 +31,8 @@ typedef struct {
     int                devices_known;   /* 见过的设备数 */
     long               last_event_ts;   /* 最近一条端侧事件时间戳(0=无) */
     char               last_event_device[32];
+    char               stream_url[160];     /* 端侧上报的视频流地址(HTTP MJPEG) */
+    int                device_paused;   /* 端侧自报的暂停状态(1=已暂停上报) */
 } mqtt_bridge_stats_t;
 
 /* host/port：broker 地址；topic_prefix 例 "edgefusion/device"；
