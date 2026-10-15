@@ -541,3 +541,90 @@ python3 scripts/slow-rtsp-client.py 127.0.0.1 8554 60   # 慢客户端复现工�
 
 > 后台运行 ffmpeg 必须加 `-nostdin`，否则会被 SIGTTIN 挂起（不拉流也不报错）。
 
+## 改动六：MQTT 云-边-端 接入 + 三级智能分析
+
+上游是「端(V821) + 边(IMX6ULL) + 云(大模型)」三层。本仓库把「端」换成一台独立设备
+（用 PC 摄像头模拟网络摄像机，代码在 `edgefusion_vision/device_agent/`），与网关通过 **MQTT** 通信；
+网关保持单板可用，同时具备**三级智能**，且每一级都能独立降级。
+
+### 架构与主题约定
+
+```
+[端 device]                      [边 gateway (RK3576)]                     [云 cloud]
+ USB 摄像头                       自研 MQTT 3.1.1 客户端                     OpenAI 兼容端点
+ ├ 帧差法移动检测(本地)            ├ 订阅 device/+/status|event|snapshot     (DeepSeek 等)
+ └ Python agent(paho)             ├ status   → 在线状态(含 LWT 离线判定)
+   ├ status   心跳(保留+LWT)       ├ event    → event_bus(SQLite) + Web 事件中心
+   ├ event    事件(QoS1)           ├ snapshot → 存盘 + 作为事件缩略图
+   ├ snapshot 快照(QoS0)           ├ 帧来源可切换 local|device|both
+   └ 订阅 cmd 执行命令              └ 送云端 AI 分析 → 事件入库
+                                   视频：端侧 HTTP MJPEG(浏览器直连)；边侧 Web MJPEG / RTSP 转发
+```
+
+| 主题 | 方向 | QoS | 载荷 |
+|---|---|---|---|
+| `edgefusion/device/<id>/status` | 端→边 | 0（保留） | JSON：`online/ts/fps/paused/snapshots/events/stream` |
+| `edgefusion/device/<id>/event` | 端→边 | 1 | JSON：`event/confidence/ts/width/height` |
+| `edgefusion/device/<id>/snapshot` | 端→边 | 0 | JPEG 二进制（约 21 KB @640×360） |
+| `edgefusion/device/<id>/cmd` | 边→端 | 1 | JSON：`{"cmd":"snapshot\|pause\|resume\|set_snapshot_interval","value":N}` |
+
+**设计取舍**：MQTT 只承载**控制 + 事件 + 快照**，视频走 HTTP(MJPEG)/RTSP。
+MQTT 面向小报文，不适合传视频流；这也是真实产品的常见分工。
+
+### 三级智能（每级可独立降级）
+
+| 级别 | 位置 | 能力 | 代价 | 状态 |
+|---|---|---|---|---|
+| 端侧 | PC agent | 帧差法移动检测（离线、零依赖） | 只能判"有动静" | ✅ 已验证 |
+| 边端 | RK3576 网关 | 云端大模型看图（分析后端可插拔：改 base_url/模型即可） | 需联网、按调用计费、1.5 s 级延迟 | ✅ 已验证 |
+| 边端(规划) | RK3576 NPU | 板端推理（离线、低延迟） | 需模型转换与部署 | ⏳ 环境已实测（YOLOv5s 640×640 单帧 29 ms，约 34 fps） |
+
+### 板端验证结果
+
+| 检查 | 结果 |
+|---|---|
+| 自研 MQTT 客户端 ↔ 标准 mosquitto | 连接/订阅/QoS1 往返/100 KB 大载荷逐字节校验全过（`make test-mqtt`） |
+| 断线重连 | 杀 broker → 退避 300/600/1200/2000 ms 封顶 → 恢复后 1 s 内重连，收发继续、`dropped=0` |
+| 端→边 实时链路 | 快照每 5 s 到达并存盘；**真实移动事件**（conf=0.82）入库 |
+| 端离线判定 | agent 停止 → broker 用 LWT 自动置 `online:false`，网关记录"离线（含 LWT）" |
+| 边→端 命令闭环 | Web `POST /api/mqtt/cmd`：`pause` 后 8 s 新增快照 **0**；`resume` 后 **4**；改间隔生效 |
+| 云端 AI（DeepSeek） | **168 条真实 `person_detected` 入库**，描述含画面细节（如"穿黑色短袖的人坐在桌前操作白色键盘"）；单次约 1.5 s；`/api/status` 暴露 `frames_submitted/last_call_ms` |
+| 两路同时分析 | `ai_source=both`：网关摄像头(640×480) 与端侧快照(640×360) 同道分析，事件描述带 `[网关]`/`[端侧]` 标记 |
+| 降级 | broker 挂掉 / 云端 AI 关闭时，录像、Web 预览、RTSP 转发**完全不受影响** |
+| 端侧视频 | 端侧在 status 里上报自己的 MJPEG 地址（`stream`），网页直连播放约 12 fps |
+
+### 本轮踩坑记（10 个真实缺陷，均已修复并复验）
+
+| # | 现象 | 根因 | 修复 |
+|---|---|---|---|
+| 1 | 配置页"加载失败" | `/api/config` 拼 JSON 未转义，AI Prompt 里的引号破坏响应 | 新增 `json_escape_into()` |
+| 2 | 云端调用全部 401 | 网页回显的是**打码 token**，保存时把真实 Key 覆盖掉 | 含 `****` 或空值时不覆盖 |
+| 3 | "模型输出未含 JSON" | 模型先输出解释文字 | 请求体加 `response_format={"type":"json_object"}` |
+| 4 | 日志乱码、掩盖真因 | **先 `free()` 后打印**（use-after-free） | 修正释放顺序 + 打印原始响应诊断 |
+| 5 | 约 1/3 调用解析失败 | `extract_json_object` 直接数 `{}`，**不识别字符串内的花括号** | 改为字符串感知，单测 4/4 |
+| 6 | `grep` 跳过日志 | 日志被二进制字节污染 | `sanitize_into()` 不可打印字节替换为 `.` |
+| 7 | 事件永远"无图" | 录像写在 tmpfs `/tmp`，空间低于 `storage_min_free_mb=500` 触发快照清理，**刚写的图被秒删** | 清理后不再触发（476 MB→3.9 GB）；建议录像落磁盘 |
+| 8 | "两者都分析"选了没反应 | `ai_source` 只在 AI 线程启动时读取 | 改为**每轮重算**，网页改动立即生效 |
+| 9 | 保存后 base_url/模型/Prompt 丢失 | `conf_save` 只替换文件里**已存在**的键，不新增 | 补齐键后正常保存 |
+| 10 | 端侧 agent 崩溃 | PC 上是 **OpenCV 5**，`accumulateWeighted` 不再支持 uint8 | 改用 `addWeighted` 更新背景 |
+
+> 这 10 条都是"能讲出完整因果链"的工程细节：现象 → 定位手段（日志/探针/单元测试）→ 根因 → 修复 → 复验。
+
+### 相关工具
+
+| 工具 | 用途 |
+|---|---|
+| `scripts/mock-ai-server.py` | 模拟 OpenAI 兼容 AI 服务，**无需真实 Key** 即可验证云端分析链路 |
+| `scripts/pre-push-secret-check.sh` | 推送前密钥自检（可装为 git hook，实测能拦住含 `sk-` 的推送） |
+| `src/mqtt_client.[ch]` | 自研 MQTT 3.1.1 客户端（报文/心跳/重连/主题匹配/QoS1 重发） |
+| `tests/test_mqtt_client.c` | 纯逻辑单测 + 对真实 broker 的集成测试 |
+| `tests/test_mqtt_reconnect.c` + `scripts/mqtt-reconnect-test.sh` | 断线重连验证（用户态 broker，无需 root） |
+
+### 边界与不做项
+
+- **没有** MQTT over TLS、用户名口令认证（实验环境匿名 + `allow_anonymous`）；生产必须补。
+- **没有** QoS2 与离线消息队列（进程重启期间的设备消息会丢，靠周期快照自愈）。
+- 视频不走 MQTT 是**设计取舍**而非缺陷；端侧视频目前是 HTTP MJPEG，未做端侧 RTSP。
+- 云端 AI 依赖 Prompt 约束输出格式；未做 JSON Schema 强校验与失败重试。
+- 多设备（`+` 通配）已支持但只验证过单设备；未做设备鉴权与配额。
+
