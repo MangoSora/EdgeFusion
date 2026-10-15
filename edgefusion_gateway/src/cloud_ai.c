@@ -273,20 +273,33 @@ static void process_one_frame(uint8_t *jpeg, int sz)
         return;
     }
 
+    /* 注意：先解析、后释放；日志必须在释放之前打印（此前顺序反了，打印的是已释放内存，
+     * 表现为"乱码"，把真正的失败原因掩盖了）。 */
     char *model_text = parse_openai_response(resp);
-    free(resp);
-    if (!model_text) { LOG_WRN("cloud_ai 响应无 choices[0].message.content"); return; }
-
-    char *json_str = extract_json_object(model_text);
-    free(model_text);
-    if (!json_str) {
-        char a[300], b[300];
-        sanitize_into(model_text, a, sizeof(a), 200);
+    if (!model_text) {
+        char b[300];
         sanitize_into(resp ? resp : "(null)", b, sizeof(b), 200);
-        LOG_WRN("cloud_ai 模型输出未含 JSON | HTTP=%ld 响应长度=%zu | content=%.200s | 原始响应前200字节=%.200s",
-                http_code, resp ? strlen(resp) : 0, a, b);
+        LOG_WRN("cloud_ai 响应无 content | HTTP=%ld 响应长度=%zu | 响应前200=%s",
+                http_code, resp ? strlen(resp) : 0, b);
+        free(resp);
         return;
     }
+    char *json_str = extract_json_object(model_text);
+    if (!json_str) {
+        char a[300], b[300];
+        size_t rl = resp ? strlen(resp) : 0;
+        sanitize_into(model_text, a, sizeof(a), 220);
+        sanitize_into(rl > 220 ? resp + rl - 220 : (resp ? resp : ""), b, sizeof(b), 220);
+        LOG_WRN("cloud_ai 未含 JSON | HTTP=%ld 响应长度=%zu 末字符=%c | content长度=%zu 含左括号=%d"
+                " | content=%.220s | 响应尾部=%.220s",
+                http_code, rl, rl ? resp[rl - 1] : '?', strlen(model_text),
+                strchr(model_text, '{') ? 1 : 0, a, b);
+        free(model_text);
+        free(resp);
+        return;
+    }
+    free(model_text);
+    free(resp);
 
     event_t ev;
     memset(&ev, 0, sizeof(ev));
