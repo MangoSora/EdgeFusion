@@ -1,6 +1,7 @@
 #include "mqtt_bridge.h"
 #include "mqtt_client.h"
 #include "event_bus.h"
+#include "cloud_ai.h"
 #include "log.h"
 
 #include <dirent.h>
@@ -36,6 +37,7 @@ static device_state_t   g_devices[BRIDGE_MAX_DEVICES];
 static int              g_device_count;
 
 static unsigned long      g_snap_seq;
+static unsigned long long g_frames_to_ai;   /* 投递给分析流水线的端侧帧数 */
 static unsigned long long g_events_stored;
 static unsigned long long g_snapshots_saved;
 static long               g_last_event_ts;
@@ -198,6 +200,12 @@ static void handle_snapshot(const char *dev, const uint8_t *payload, size_t len)
     pthread_mutex_unlock(&g_snap_lock);
 
     LOG_INF("mqtt 端侧快照存盘: %s (%zu 字节) → %s", dev, len, path);
+
+    /* 端侧画面送边端分析流水线（cloud_ai，来源含 device 时才会入队） */
+    if (cloud_ai_submit_jpeg(payload, (int)len) == 0) {
+        g_frames_to_ai++;
+        LOG_DBG("mqtt 端侧快照已投递 AI 分析队列: %s (%zu 字节)", dev, len);
+    }
     device_state_t *d = device_get(dev);
     if (d) d->last_seen = now_s();
 }
@@ -315,6 +323,7 @@ void mqtt_bridge_get_stats(mqtt_bridge_stats_t *out)
     snprintf(out->last_event_device, sizeof(out->last_event_device), "%s", g_last_event_device);
     snprintf(out->stream_url, sizeof(out->stream_url), "%s", g_stream_url);
     out->device_paused = g_device_paused;
+    out->frames_to_ai = g_frames_to_ai;
 
     int online = 0;
     for (int i = 0; i < g_device_count; ++i)

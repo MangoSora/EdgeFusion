@@ -40,6 +40,7 @@ typedef struct {
     int   ai_jpeg_quality;
     int   ai_http_timeout_s;
     int   ai_max_queue;
+    char  ai_source[16];       /* 分析帧来源: local|device|both */
     char  anthropic_base_url[256];
     char  anthropic_auth_token[256];
     char  anthropic_model[64];
