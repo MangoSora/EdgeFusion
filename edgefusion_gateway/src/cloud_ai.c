@@ -130,16 +130,30 @@ static void sanitize_into(const char *src, char *dst, size_t cap, size_t maxlen)
     dst[o] = '\0';
 }
 
+/* 从模型输出里取出第一个"完整的 JSON 对象"。
+ * 关键：必须识别字符串内的花括号（描述文本里可能出现 { 或 }），
+ * 否则括号计数会错乱 —— 这是此前约 1/3 调用"未含 JSON"的根因。 */
 static char *extract_json_object(const char *text)
 {
     if (!text) return NULL;
     const char *p = strchr(text, '{');
     if (!p) return NULL;
+
     int depth = 0;
+    int in_str = 0, esc = 0;
     const char *start = p;
     for (; *p; p++) {
-        if (*p == '{') depth++;
-        else if (*p == '}') {
+        char c = *p;
+        if (in_str) {
+            if (esc)                esc = 0;
+            else if (c == '\\')    esc = 1;
+            else if (c == '"')      in_str = 0;
+            continue;
+        }
+        if (c == '"') { in_str = 1; continue; }
+        if (c == '{') {
+            depth++;
+        } else if (c == '}') {
             depth--;
             if (depth == 0) {
                 size_t len = (size_t)(p - start) + 1;
