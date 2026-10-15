@@ -117,6 +117,19 @@ static char *build_request_body(const char *prompt, const char *model, const cha
 }
 
 /* 从模型文本输出中提取首个 {...} 子串(剥 ```json 围栏)。返回 malloc 或 NULL */
+
+/* 把不可打印字节替换为 '.'（保留 >=0x20 的 UTF-8 字节），避免日志变成二进制文件 */
+static void sanitize_into(const char *src, char *dst, size_t cap, size_t maxlen)
+{
+    size_t o = 0;
+    if (!dst || cap < 2) return;
+    for (size_t i = 0; src && src[i] && i < maxlen && o + 1 < cap; ++i) {
+        unsigned char c = (unsigned char)src[i];
+        dst[o++] = (c >= 0x20) ? (char)c : '.';
+    }
+    dst[o] = '\0';
+}
+
 static char *extract_json_object(const char *text)
 {
     if (!text) return NULL;
@@ -267,7 +280,11 @@ static void process_one_frame(uint8_t *jpeg, int sz)
     char *json_str = extract_json_object(model_text);
     free(model_text);
     if (!json_str) {
-        LOG_WRN("cloud_ai 模型输出未含 JSON，原文前 240 字: %.240s", model_text);
+        char a[300], b[300];
+        sanitize_into(model_text, a, sizeof(a), 200);
+        sanitize_into(resp ? resp : "(null)", b, sizeof(b), 200);
+        LOG_WRN("cloud_ai 模型输出未含 JSON | HTTP=%ld 响应长度=%zu | content=%.200s | 原始响应前200字节=%.200s",
+                http_code, resp ? strlen(resp) : 0, a, b);
         return;
     }
 
