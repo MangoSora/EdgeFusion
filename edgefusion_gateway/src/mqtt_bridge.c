@@ -14,6 +14,7 @@
 #include <strings.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <unistd.h>   /* unlink() */
 #include <time.h>
 
 #define BRIDGE_MAX_DEVICES     8
@@ -402,7 +403,7 @@ static void prune_old_snapshots(const char *devdir)
         const char *dot = strrchr(de->d_name, '.');
         if (!dot || strcasecmp(dot, ".jpg") != 0) continue;
         if (n < (int)(sizeof(names) / sizeof(names[0])))
-            snprintf(names[n++], sizeof(names[0]), "%s", de->d_name);
+            snprintf(names[n++], sizeof(names[0]), "%.40s", de->d_name);
     }
     closedir(d);
     if (n <= BRIDGE_SNAPSHOT_KEEP) return;
