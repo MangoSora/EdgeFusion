@@ -69,6 +69,7 @@ int conf_load(gateway_conf_t *cfg, const char *path)
     cfg->ai_jpeg_quality = 70;
     cfg->ai_http_timeout_s = 30;
     cfg->ai_max_queue = 2;
+    strcpy(cfg->ai_source, "local");
     strcpy(cfg->anthropic_model, "deepseek-v4-pro[1m]");
     cfg->alarm_gpio_led = -1;
     cfg->alarm_gpio_buzzer = -1;
@@ -130,6 +131,7 @@ int conf_load(gateway_conf_t *cfg, const char *path)
         else if (!strcmp(key, "ai_jpeg_quality"))     cfg->ai_jpeg_quality = atoi(val);
         else if (!strcmp(key, "ai_http_timeout_s"))   cfg->ai_http_timeout_s = atoi(val);
         else if (!strcmp(key, "ai_max_queue"))        cfg->ai_max_queue = atoi(val);
+        else if (!strcmp(key, "ai_source"))          set_str(cfg->ai_source, sizeof(cfg->ai_source), val);
         else if (!strcmp(key, "anthropic_base_url"))  set_str(cfg->anthropic_base_url, sizeof(cfg->anthropic_base_url), val);
         else if (!strcmp(key, "anthropic_auth_token"))set_str(cfg->anthropic_auth_token, sizeof(cfg->anthropic_auth_token), val);
         else if (!strcmp(key, "anthropic_model"))     set_str(cfg->anthropic_model, sizeof(cfg->anthropic_model), val);
@@ -207,6 +209,7 @@ void conf_dump(const gateway_conf_t *cfg)
     LOG_INF("单段时长      : %d 秒", cfg->segment_seconds);
     LOG_INF("SQLite        : %s", cfg->sqlite_db_path);
     LOG_INF("AI 帧率       : %d fps, 缩放宽 %dpx, 启用=%s", cfg->ai_fps, cfg->ai_frame_width, cfg->ai_enable ? "是" : "否");
+    LOG_INF("AI 帧来源    : %s (local|device|both)", cfg->ai_source);
     LOG_INF("云端端点      : %s", cfg->anthropic_base_url);
     LOG_INF("云端模型      : %s", cfg->anthropic_model);
     LOG_INF("云端Token     : %s", cfg->anthropic_auth_token[0] ? "(已设置)" : "(未设置)");
@@ -247,6 +250,7 @@ static int format_value(const gateway_conf_t *cfg, const char *key, char *out, s
     else if (!strcmp(key, "ai_jpeg_quality"))     { snprintf(out, cap, "%d", cfg->ai_jpeg_quality); return 1; }
     else if (!strcmp(key, "ai_http_timeout_s"))   { snprintf(out, cap, "%d", cfg->ai_http_timeout_s); return 1; }
     else if (!strcmp(key, "ai_max_queue"))        { snprintf(out, cap, "%d", cfg->ai_max_queue); return 1; }
+    else if (!strcmp(key, "ai_source"))          { snprintf(out, cap, "%s", cfg->ai_source); return 1; }
     else if (!strcmp(key, "anthropic_base_url"))  { snprintf(out, cap, "%s", cfg->anthropic_base_url); return 1; }
     else if (!strcmp(key, "anthropic_auth_token")){ snprintf(out, cap, "%s", cfg->anthropic_auth_token); return 1; }
     else if (!strcmp(key, "anthropic_model"))     { snprintf(out, cap, "%s", cfg->anthropic_model); return 1; }

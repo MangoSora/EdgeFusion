@@ -1,4 +1,5 @@
 #include "cloud_ai.h"
+#include <stdatomic.h>
 #include "log.h"
 #include "frame_grabber.h"
 #include "event_bus.h"
@@ -277,6 +278,64 @@ static void process_one_frame(uint8_t *jpeg, int sz)
     free(json_str);
 }
 
+/* ---------- 待分析帧队列（端侧快照与本地帧的统一入口） ---------- */
+#define AI_QUEUE_MAX 4
+
+static uint8_t          *g_q_buf[AI_QUEUE_MAX];
+static int               g_q_len[AI_QUEUE_MAX];
+static int               g_q_count;
+static pthread_mutex_t   g_q_mtx = PTHREAD_MUTEX_INITIALIZER;
+static atomic_int        g_accept_device;          /* 由分析线程按 ai_source 设置 */
+static unsigned long long g_q_accepted, g_q_dropped;
+
+int cloud_ai_submit_jpeg(const uint8_t *jpeg, int len)
+{
+    if (!g_running || !jpeg || len <= 0) return -1;
+    if (!atomic_load(&g_accept_device)) return -1;   /* 当前来源不含端侧帧 */
+
+    uint8_t *copy = malloc((size_t)len);
+    if (!copy) return -1;
+    memcpy(copy, jpeg, (size_t)len);
+
+    pthread_mutex_lock(&g_q_mtx);
+    if (g_q_count >= AI_QUEUE_MAX) {                 /* 满：丢最旧，保证延迟不堆积 */
+        free(g_q_buf[0]);
+        memmove(&g_q_buf[0], &g_q_buf[1], sizeof(g_q_buf[0]) * (size_t)(AI_QUEUE_MAX - 1));
+        memmove(&g_q_len[0], &g_q_len[1], sizeof(g_q_len[0]) * (size_t)(AI_QUEUE_MAX - 1));
+        g_q_count--;
+        g_q_dropped++;
+    }
+    g_q_buf[g_q_count] = copy;
+    g_q_len[g_q_count] = len;
+    g_q_count++;
+    g_q_accepted++;
+    pthread_mutex_unlock(&g_q_mtx);
+    return 0;
+}
+
+static uint8_t *ai_queue_take(int *len)
+{
+    uint8_t *out = NULL;
+    pthread_mutex_lock(&g_q_mtx);
+    if (g_q_count > 0) {
+        out = g_q_buf[0];
+        *len = g_q_len[0];
+        memmove(&g_q_buf[0], &g_q_buf[1], sizeof(g_q_buf[0]) * (size_t)(AI_QUEUE_MAX - 1));
+        memmove(&g_q_len[0], &g_q_len[1], sizeof(g_q_len[0]) * (size_t)(AI_QUEUE_MAX - 1));
+        g_q_count--;
+    }
+    pthread_mutex_unlock(&g_q_mtx);
+    return out;
+}
+
+void cloud_ai_submit_stats(unsigned long long *accepted, unsigned long long *dropped)
+{
+    pthread_mutex_lock(&g_q_mtx);
+    if (accepted) *accepted = g_q_accepted;
+    if (dropped)  *dropped  = g_q_dropped;
+    pthread_mutex_unlock(&g_q_mtx);
+}
+
 static void *ai_thread(void *arg)
 {
     (void)arg;
@@ -291,14 +350,29 @@ static void *ai_thread(void *arg)
     LOG_INF("cloud_ai 线程启动: %s model=%s fps=%d", g_cfg.anthropic_base_url, g_cfg.anthropic_model, g_cfg.ai_fps);
 
     int interval_us = (g_cfg.ai_fps > 0) ? (1000000 / g_cfg.ai_fps) : 1000000;
+    /* 帧来源：local=网关自己的摄像头；device=端侧上报的快照；both=两者都分析。
+     * device/both 时由 mqtt_bridge 调 cloud_ai_submit_jpeg() 投递。 */
+    int src_local  = strcmp(g_cfg.ai_source, "device") != 0;
+    int src_device = strcmp(g_cfg.ai_source, "local")  != 0;
+    atomic_store(&g_accept_device, src_device);
+    LOG_INF("cloud_ai 帧来源: %s (local=%d device=%d)", g_cfg.ai_source, src_local, src_device);
+
     while (g_running) {
-        uint8_t *jpeg = NULL;
-        int sz = frame_grabber_get_jpeg(&jpeg);
-        if (sz <= 0 || !jpeg) {
-            if (jpeg) free(jpeg);
-            usleep(interval_us);
-            continue;
+        int sz = 0;
+        /* 1) 外部投递的帧（端侧快照）优先，保证端侧事件不被本地帧挤掉 */
+        uint8_t *jpeg = src_device ? ai_queue_take(&sz) : NULL;
+
+        /* 2) 本地源：取 frame_grabber 的最新 JPEG（返回值需 free） */
+        if (!jpeg && src_local) {
+            sz = frame_grabber_get_jpeg(&jpeg);
+            if (sz <= 0 || !jpeg) {
+                if (jpeg) free(jpeg);
+                usleep(interval_us);
+                continue;
+            }
         }
+        if (!jpeg) { usleep(interval_us); continue; }
+
         process_one_frame(jpeg, sz);
         free(jpeg);
         /* 调用可能耗时数秒，这里只做上限节流 */
@@ -373,5 +447,10 @@ void cloud_ai_stop(void)
     g_running = false;
     pthread_join(g_tid, NULL);
     curl_global_cleanup();
+    atomic_store(&g_accept_device, 0);
+    pthread_mutex_lock(&g_q_mtx);
+    for (int i = 0; i < g_q_count; ++i) free(g_q_buf[i]);
+    g_q_count = 0;
+    pthread_mutex_unlock(&g_q_mtx);
     LOG_INF("cloud_ai 线程已停止");
 }

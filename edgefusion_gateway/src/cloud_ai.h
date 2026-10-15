@@ -2,6 +2,7 @@
 #define EDGEFUSION_CLOUD_AI_H
 
 #include "conf.h"
+#include <stdint.h>
 
 /* cloud_ai: 消费 frame_grabber 最新 JPEG，调云端(OpenAI 兼容端点) 做异常检测，
  * 解析返回的结构化 JSON，把事件 publish 到 event_bus（含快照）。
@@ -17,6 +18,14 @@ typedef struct {
     int  running;   /* 线程存活 */
 } cloud_ai_status_t;
 int  cloud_ai_get_status(cloud_ai_status_t *st);
+
+/* 投递一帧（JPEG）给分析线程：端侧上报的快照走这里进来。
+ * 线程未运行、或 ai_source 不含 device 时返回 -1（丢弃，不阻塞调用方）。
+ * 队列有界（满则丢最旧），因此 MQTT 回调/录像主链路都不会被云端调用拖慢。 */
+int  cloud_ai_submit_jpeg(const uint8_t *jpeg, int len);
+
+/* 投递统计：成功入队帧数、因队列满丢弃帧数 */
+void cloud_ai_submit_stats(unsigned long long *accepted, unsigned long long *dropped);
 
 /* 热重载配置（ai_enable/ai_fps/ai_prompt/anthropic_model/anthropic_base_url）。
  * ai_enable 翻转时会热启停线程。 */

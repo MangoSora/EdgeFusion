@@ -33,6 +33,7 @@ typedef struct {
     char               last_event_device[32];
     char               stream_url[160];     /* 端侧上报的视频流地址(HTTP MJPEG) */
     int                device_paused;   /* 端侧自报的暂停状态(1=已暂停上报) */
+    unsigned long long frames_to_ai;    /* 投递给 AI 分析流水线的端侧帧数 */
 } mqtt_bridge_stats_t;
 
 /* host/port：broker 地址；topic_prefix 例 "edgefusion/device"；
