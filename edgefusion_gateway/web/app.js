@@ -6,7 +6,7 @@ const $$ = (s) => document.querySelectorAll(s);
 /* ─── Toast ─── */
 function toast(msg, ok = true) {
   const t = $('#toast');
-  t.innerHTML = (ok ? '✓' : '✕') + ' ' + msg;
+  t.textContent = (ok ? '✓' : '✕') + ' ' + msg;
   t.className = 'toast ' + (ok ? 'ok' : 'err') + ' show';
   clearTimeout(t._tid);
   t._tid = setTimeout(() => t.classList.remove('show'), 2800);
@@ -790,24 +790,53 @@ async function refreshDevice() {
   } catch (err) { /* 静默重试 */ }
 }
 
-async function mqCmd(cmd, value) {
-  const body = { device: 'A1', cmd };
-  if (value !== undefined) body.value = value;
+/* HTTP accepted != device executed. Keep an unknown result distinct from rejection. */
+async function requestMqttCommand(body) {
+  let r;
   try {
-    const r = await fetch('/api/mqtt/cmd', {
+    r = await fetch('/api/mqtt/cmd', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
     });
-    const j = await r.json();
-    const t = new Date().toLocaleTimeString();
-    mqCmdLog.unshift(`${t} · ${cmd}${value !== undefined ? '(' + value + ')' : ''} → ` + (j.ok ? '✅ 已下发' : '❌ ' + (j.error || '失败')));
-    mqCmdLog = mqCmdLog.slice(0, 8);
-    toast(j.ok ? `已下发：${cmd}（端侧确认后"上报状态"会变化）` : `下发失败：${j.error || '未知错误'}`, !!j.ok);
-    refreshDevice();
-    setTimeout(refreshDevice, 1500);   /* 端侧执行 + 回传状态需要一点时间，补刷一次 */
-    setTimeout(refreshDevice, 4000);
   } catch (e) {
-    toast('下发失败：网络错误', false);
+    console.error('MQTT command request failed', e);
+    return { ok: false, message: '未收到服务器响应，命令结果未知，请先查看端侧状态' };
   }
+  let j;
+  try {
+    j = await r.json();
+  } catch (e) {
+    console.error('Invalid MQTT command response', r.status, e);
+    return { ok: false, message: r.ok
+      ? '服务器响应格式异常，命令可能已下发，请先查看端侧状态'
+      : '下发失败：HTTP ' + r.status + '（响应格式异常）' };
+  }
+  if (!r.ok) {
+    return { ok: false, message: '下发失败：HTTP ' + r.status +
+      (j && typeof j.error === 'string' ? ' · ' + j.error : '') };
+  }
+  if (!j || typeof j.ok !== 'boolean') {
+    return { ok: false, message: '服务器响应缺少有效的 ok 字段，命令结果未知' };
+  }
+  if (!j.ok) {
+    return { ok: false, message: '下发失败：' + (typeof j.error === 'string' ? j.error : '服务器拒绝命令') };
+  }
+  return { ok: true, message: '已提交：' + body.cmd + '（等待端侧执行，请查看上报状态或快照）' };
+}
+
+async function mqCmd(cmd, value) {
+  const body = { device: 'A1', cmd };
+  if (value !== undefined) body.value = value;
+  const result = await requestMqttCommand(body);
+  const t = new Date().toLocaleTimeString();
+  mqCmdLog.unshift(escHtml(t + ' · ' + cmd +
+    (value !== undefined ? '(' + value + ')' : '') + ' → ' +
+    (result.ok ? '✅ ' : '❌ ') + result.message));
+  mqCmdLog = mqCmdLog.slice(0, 8);
+  toast(result.message, result.ok);
+  /* Refresh errors must never turn an accepted command into a "network error". */
+  refreshDevice();
+  setTimeout(refreshDevice, 1500);
+  setTimeout(refreshDevice, 4000);
 }
