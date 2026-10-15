@@ -54,6 +54,9 @@ static char             g_snap_device[32];
 
 static int64_t now_s(void) { return (int64_t)time(NULL); }
 
+/* 前向声明：定义在文件末尾（快照清理） */
+static void prune_old_snapshots(const char *devdir);
+
 static device_state_t *device_get(const char *id)
 {
     for (int i = 0; i < g_device_count; ++i)
@@ -200,6 +203,7 @@ static void handle_snapshot(const char *dev, const uint8_t *payload, size_t len)
     pthread_mutex_unlock(&g_snap_lock);
 
     LOG_INF("mqtt 端侧快照存盘: %s (%zu 字节) → %s", dev, len, path);
+    prune_old_snapshots(dir);
 
     /* 端侧画面送边端分析流水线（cloud_ai，来源含 device 时才会入队） */
     if (cloud_ai_submit_jpeg(payload, (int)len) == 0) {
@@ -378,4 +382,47 @@ int mqtt_bridge_latest_snapshot(char *out, size_t cap)
     if (best_key < 0) return -1;
     snprintf(out, cap, "%s", best_path);
     return 0;
+}
+
+/* 端侧快照会持续累积（每几秒一张），这里按数量保留最近 N 张，避免把 /tmp 或磁盘写满。
+ * 每写 50 张检查一次；按文件名里的时间戳排序，删最旧的。 */
+#define BRIDGE_SNAPSHOT_KEEP 500
+static unsigned g_prune_tick;
+
+static void prune_old_snapshots(const char *devdir)
+{
+    if (++g_prune_tick % 50 != 0) return;
+
+    DIR *d = opendir(devdir);
+    if (!d) return;
+    char names[BRIDGE_SNAPSHOT_KEEP + 64][64];
+    int n = 0;
+    struct dirent *de;
+    while ((de = readdir(d)) != NULL) {
+        const char *dot = strrchr(de->d_name, '.');
+        if (!dot || strcasecmp(dot, ".jpg") != 0) continue;
+        if (n < (int)(sizeof(names) / sizeof(names[0])))
+            snprintf(names[n++], sizeof(names[0]), "%s", de->d_name);
+    }
+    closedir(d);
+    if (n <= BRIDGE_SNAPSHOT_KEEP) return;
+
+    /* 文件名形如 <unix秒>_<序号>.jpg，按字符串排序即按时间排序 */
+    for (int i = 0; i < n; ++i)
+        for (int j = i + 1; j < n; ++j)
+            if (strcmp(names[j], names[i]) < 0) {
+                char tmp[64];
+                memcpy(tmp, names[i], sizeof(tmp));
+                memcpy(names[i], names[j], sizeof(names[j]));
+                memcpy(names[j], tmp, sizeof(tmp));
+            }
+
+    int removed = 0;
+    for (int i = 0; i < n - BRIDGE_SNAPSHOT_KEEP; ++i) {
+        char path[640];
+        snprintf(path, sizeof(path), "%s/%.200s", devdir, names[i]);
+        if (unlink(path) == 0) removed++;
+    }
+    if (removed > 0)
+        LOG_INF("mqtt 端侧快照清理: 删除最旧 %d 张（保留 %d 张）", removed, BRIDGE_SNAPSHOT_KEEP);
 }
