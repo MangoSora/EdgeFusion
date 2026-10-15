@@ -930,9 +930,12 @@ static void serve_config_post(int cfd, const char *body, int body_len)
     if (json_get_str(js, "anthropic_base_url", buf, sizeof(buf)) == 0)
         strncpy(new_cfg.anthropic_base_url, buf, sizeof(new_cfg.anthropic_base_url) - 1);
     if (json_get_str(js, "anthropic_auth_token", buf, sizeof(buf)) == 0) {
-        /* Only overwrite if it's not "****" (masked placeholder) */
-        if (strcmp(buf, "****"))
+        /* 网页回显的是打码值（如 sk-xxxx****）。若把打码值或空值写回，会覆盖掉真实 Key，
+         * 后续所有调用都会 401。因此这里只在提交了"看起来是真实 Key 的值"时才更新。 */
+        if (strstr(buf, "****") == NULL && buf[0] != '\0') {
             strncpy(new_cfg.anthropic_auth_token, buf, sizeof(new_cfg.anthropic_auth_token) - 1);
+            new_cfg.anthropic_auth_token[sizeof(new_cfg.anthropic_auth_token) - 1] = 0;
+        }
     }
     if (json_get_str(js, "anthropic_model", buf, sizeof(buf)) == 0)
         strncpy(new_cfg.anthropic_model, buf, sizeof(new_cfg.anthropic_model) - 1);
