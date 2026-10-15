@@ -822,6 +822,104 @@ static void serve_mqtt_snapshot(int cfd)
     free(buf);
 }
 
+/* 紧凑 base64 解码（供外部分析后端回灌事件时附带触发帧）。返回写入字节数，失败 -1 */
+static int b64_decode(const char *in, int in_len, uint8_t *out, int out_cap)
+{
+    static int8_t T[256];
+    static int inited;
+    if (!inited) {
+        for (int i = 0; i < 256; ++i) T[i] = -1;
+        const char *A = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        for (int i = 0; A[i]; ++i) T[(unsigned char)A[i]] = (int8_t)i;
+        inited = 1;
+    }
+    int quad[4], qn = 0, o = 0;
+    for (int i = 0; i < in_len; ++i) {
+        unsigned char c = (unsigned char)in[i];
+        if (c == '=' || c == '\n' || c == '\r' || c == ' ' || c == '\t') continue;
+        if (T[c] < 0) return -1;
+        quad[qn++] = T[c];
+        if (qn == 4) {
+            if (o + 3 > out_cap) return -1;
+            out[o++] = (uint8_t)((quad[0] << 2) | (quad[1] >> 4));
+            out[o++] = (uint8_t)(((quad[1] & 0xF) << 4) | (quad[2] >> 2));
+            out[o++] = (uint8_t)(((quad[2] & 0x3) << 6) | quad[3]);
+            qn = 0;
+        }
+    }
+    if (qn == 2) {
+        if (o + 1 > out_cap) return -1;
+        out[o++] = (uint8_t)((quad[0] << 2) | (quad[1] >> 4));
+    } else if (qn == 3) {
+        if (o + 2 > out_cap) return -1;
+        out[o++] = (uint8_t)((quad[0] << 2) | (quad[1] >> 4));
+        out[o++] = (uint8_t)(((quad[1] & 0xF) << 4) | (quad[2] >> 2));
+    }
+    return o;
+}
+
+/* ─── /api/events POST ─── */
+/* 外部分析后端（如板端 NPU 推理服务）回灌事件：
+ * 请求体 {"event_type":"person_detected","confidence":0.8,"description":"...","jpeg_base64":"..."}
+ * 事件写入本机事件库（与云端 AI、端侧上报共用同一条流水线），Web 事件中心直接可见。 */
+static void serve_events_post(int cfd, const char *body, int body_len)
+{
+    if (!body || body_len <= 0) {
+        const char *e = "{\"ok\":false,\"error\":\"empty body\"}";
+        send_json(cfd, 400, e, (int)strlen(e));
+        return;
+    }
+    struct json_object *root = json_tokener_parse(body);
+    if (!root) {
+        const char *e = "{\"ok\":false,\"error\":\"invalid json\"}";
+        send_json(cfd, 400, e, (int)strlen(e));
+        return;
+    }
+    struct json_object *o = NULL;
+    event_t ev;
+    memset(&ev, 0, sizeof(ev));
+    ev.created_at = time(NULL);
+    snprintf(ev.event_type, sizeof(ev.event_type), "%s", "external_event");
+    if (json_object_object_get_ex(root, "event_type", &o))
+        snprintf(ev.event_type, sizeof(ev.event_type), "%s", json_object_get_string(o));
+    if (json_object_object_get_ex(root, "confidence", &o))
+        ev.confidence = (float)json_object_get_double(o);
+    if (json_object_object_get_ex(root, "description", &o))
+        snprintf(ev.description, sizeof(ev.description), "%s", json_object_get_string(o));
+    snprintf(ev.suggested_action, sizeof(ev.suggested_action), "%s", "record");
+    if (json_object_object_get_ex(root, "suggested_action", &o))
+        snprintf(ev.suggested_action, sizeof(ev.suggested_action), "%s", json_object_get_string(o));
+
+    /* 可选：把触发帧一起带上，作为事件证据图 */
+    uint8_t *jpeg = NULL;
+    int jlen = 0;
+    if (json_object_object_get_ex(root, "jpeg_base64", &o)) {
+        const char *b64 = json_object_get_string(o);
+        size_t blen = b64 ? strlen(b64) : 0;
+        if (blen > 0 && blen < 8u * 1024 * 1024) {
+            size_t cap = blen / 4 * 3 + 4;
+            uint8_t *dec = malloc(cap);
+            if (dec) {
+                int n = b64_decode(b64, (int)blen, dec, (int)cap);   /* 复用已有 base64 解码 */
+                if (n > 0) { jpeg = dec; jlen = n; }
+                else free(dec);
+            }
+        }
+    }
+    long id = event_bus_publish(&ev, jpeg, jlen);
+    free(jpeg);
+    json_object_put(root);
+
+    char resp[256];
+    if (id >= 0)
+        snprintf(resp, sizeof(resp),
+                 "{\"ok\":true,\"event_id\":%ld,\"type\":\"%s\",\"with_image\":%s}",
+                 id, ev.event_type, jlen > 0 ? "true" : "false");
+    else
+        snprintf(resp, sizeof(resp), "{\"ok\":false,\"error\":\"publish failed\"}");
+    send_json(cfd, id >= 0 ? 200 : 500, resp, (int)strlen(resp));
+}
+
 /* ─── /api/mqtt/cmd POST ─── */
 /* 下发命令给端侧设备。请求体：{"device":"A1","cmd":"snapshot"} 或带参数
  * {"device":"A1","cmd":"set_snapshot_interval","value":3}；device 省略时默认 A1。 */
@@ -1104,6 +1202,8 @@ static void handle_client_inner(int cfd)
             serve_config_post(cfd, post_body, post_len);
         } else if (!strcmp(path, "/api/mqtt/cmd")) {
             serve_mqtt_cmd(cfd, post_body, post_len);
+        } else if (!strcmp(path, "/api/events")) {
+            serve_events_post(cfd, post_body, post_len);
         } else {
             const char *e = "HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n";
             send(cfd, e, strlen(e), 0);
