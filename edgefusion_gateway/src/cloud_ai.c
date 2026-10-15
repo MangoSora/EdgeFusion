@@ -99,6 +99,12 @@ static char *build_request_body(const char *prompt, const char *model, const cha
     json_object_array_add(messages, msg);
     json_object_object_add(root, "messages", messages);
 
+    /* 强制 JSON 输出：很多模型（含 deepseek-flash）不加这个会先输出一段解释文字，
+     * 解析器就找不到 JSON，事件全部被丢掉。OpenAI 兼容端点普遍支持该字段。 */
+    struct json_object *rf = json_object_new_object();
+    json_object_object_add(rf, "type", json_object_new_string("json_object"));
+    json_object_object_add(root, "response_format", rf);
+
     /* qwen3 系列默认开启思考(reasoning)，会拖慢响应且多耗 token；
      * 我们只要结构化 JSON，关闭思考以获得干净直接的 content 输出 */
     json_object_object_add(root, "enable_thinking", json_object_new_boolean(0));
@@ -260,7 +266,10 @@ static void process_one_frame(uint8_t *jpeg, int sz)
 
     char *json_str = extract_json_object(model_text);
     free(model_text);
-    if (!json_str) { LOG_WRN("cloud_ai 模型输出未含 JSON"); return; }
+    if (!json_str) {
+        LOG_WRN("cloud_ai 模型输出未含 JSON，原文前 240 字: %.240s", model_text);
+        return;
+    }
 
     event_t ev;
     memset(&ev, 0, sizeof(ev));
