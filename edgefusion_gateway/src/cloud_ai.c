@@ -268,7 +268,7 @@ static char *call_cloud(const char *body, long *http_code)
     return rbuf.data;
 }
 
-static void process_one_frame(uint8_t *jpeg, int sz)
+static void process_one_frame(uint8_t *jpeg, int sz, int from_device)
 {
     char *b64 = b64_encode(jpeg, sz);
     if (!b64) return;
@@ -320,6 +320,10 @@ static void process_one_frame(uint8_t *jpeg, int sz)
     if (parse_event_json(json_str, &ev) == 0) {
         /* 只对真实事件入库（none 不存，避免刷库）；快照用触发帧 */
         if (strcmp(ev.event_type, "none") != 0) {
+            /* 打上来路标记：事件列表里一眼分清来自哪路画面 */
+            char tagged[sizeof(ev.description)];
+            snprintf(tagged, sizeof(tagged), "%s%s", from_device ? "[端侧] " : "[网关] ", ev.description);
+            snprintf(ev.description, sizeof(ev.description), "%s", tagged);
             long id = event_bus_publish(&ev, jpeg, sz);
             LOG_INF("cloud_ai 检测事件 id=%ld type=%s conf=%.2f desc=%s", id, ev.event_type, ev.confidence, ev.description);
         } else {
@@ -416,11 +420,27 @@ static void *ai_thread(void *arg)
 
     while (g_running) {
         int sz = 0;
+        int from_device = 0;
+
+        /* 每轮都按"当前配置"重算来源：这样网页上改「分析帧来源」立刻生效，
+         * 不必重启网关（此前只在启动时算一次，改了没反应）。 */
+        char src_now[16];
+        pthread_mutex_lock(&g_cfg_mtx);
+        snprintf(src_now, sizeof(src_now), "%s", g_cfg.ai_source);
+        pthread_mutex_unlock(&g_cfg_mtx);
+        src_local  = strcmp(src_now, "device") != 0;
+        src_device = strcmp(src_now, "local")  != 0;
+        atomic_store(&g_accept_device, src_device);
+        atomic_store(&g_src_local, src_local);
+        atomic_store(&g_src_device, src_device);
+
         /* 1) 外部投递的帧（端侧快照）优先，保证端侧事件不被本地帧挤掉 */
         uint8_t *jpeg = src_device ? ai_queue_take(&sz) : NULL;
+        if (jpeg) from_device = 1;
 
         /* 2) 本地源：取 frame_grabber 的最新 JPEG（返回值需 free） */
         if (!jpeg && src_local) {
+            from_device = 0;
             sz = frame_grabber_get_jpeg(&jpeg);
             if (sz <= 0 || !jpeg) {
                 if (jpeg) free(jpeg);
@@ -432,7 +452,7 @@ static void *ai_thread(void *arg)
 
         struct timespec t0, t1;
         clock_gettime(CLOCK_MONOTONIC, &t0);
-        process_one_frame(jpeg, sz);
+        process_one_frame(jpeg, sz, from_device);
         clock_gettime(CLOCK_MONOTONIC, &t1);
         atomic_store(&g_last_call_ms,
                      (int)((t1.tv_sec - t0.tv_sec) * 1000 + (t1.tv_nsec - t0.tv_nsec) / 1000000));
