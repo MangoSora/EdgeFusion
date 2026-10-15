@@ -8,6 +8,30 @@
 #include "mqtt_bridge.h"
 
 #include <json-c/json.h>
+
+/* JSON 字符串转义（" \ 换行/制表/控制字符）。
+ * 配置项里可能出现引号——最典型是 AI Prompt 里的 {"event_type":...}；
+ * 直接拼进 JSON 会让 /api/config 的响应变成非法 JSON，网页就报"配置加载失败"。*/
+static void json_escape_into(const char *src, char *dst, size_t cap)
+{
+    if (!dst || cap == 0) return;
+    if (!src) { dst[0] = '\0'; return; }
+    size_t o = 0;
+    for (size_t i = 0; src[i] && o + 8 < cap; ++i) {
+        unsigned char ch = (unsigned char)src[i];
+        switch (ch) {
+        case '"':  dst[o++] = '\\'; dst[o++] = '"';  break;
+        case '\\': dst[o++] = '\\'; dst[o++] = '\\'; break;
+        case '\n': dst[o++] = '\\'; dst[o++] = 'n';  break;
+        case '\r': dst[o++] = '\\'; dst[o++] = 'r';  break;
+        case '\t': dst[o++] = '\\'; dst[o++] = 't';  break;
+        default:
+            if (ch < 0x20) o += (size_t)snprintf(dst + o, cap - o, "\\u%04x", ch);
+            else           dst[o++] = (char)ch;
+        }
+    }
+    dst[o] = '\0';
+}
 #include "cloud_ai.h"
 
 #include <arpa/inet.h>
@@ -609,20 +633,25 @@ static void serve_config_get(int cfd)
         "\"rtsp_server_enable\":%s,\"rtsp_server_port\":%d,",
         c->rtsp_server_enable ? "true" : "false", c->rtsp_server_port);
 
-    /* recorder */
+    /* recorder（路径/前缀可能含反斜杠等，统一转义） */
+    char e_storage[512], e_prefix[128];
+    json_escape_into(c->storage_dir, e_storage, sizeof(e_storage));
+    json_escape_into(c->segment_prefix, e_prefix, sizeof(e_prefix));
     off += snprintf(json + off, sizeof(json) - off,
         "\"storage_dir\":\"%s\",\"segment_seconds\":%d,\"storage_min_free_mb\":%ld,"
         "\"segment_prefix\":\"%s\",",
-        c->storage_dir, c->segment_seconds, c->storage_min_free_mb, c->segment_prefix);
+        e_storage, c->segment_seconds, c->storage_min_free_mb, e_prefix);
 
     /* AI (mask token) */
+    char e_base[512];
+    json_escape_into(c->anthropic_base_url, e_base, sizeof(e_base));
     off += snprintf(json + off, sizeof(json) - off,
         "\"ai_enable\":%s,\"ai_fps\":%d,\"ai_frame_width\":%d,\"ai_jpeg_quality\":%d,"
         "\"ai_http_timeout_s\":%d,\"ai_max_queue\":%d,"
         "\"anthropic_base_url\":\"%s\",",
         c->ai_enable ? "true" : "false",
         c->ai_fps, c->ai_frame_width, c->ai_jpeg_quality,
-        c->ai_http_timeout_s, c->ai_max_queue, c->anthropic_base_url);
+        c->ai_http_timeout_s, c->ai_max_queue, e_base);
     /* Token: show first 8 chars mask rest */
     if (c->anthropic_auth_token[0]) {
         char masked[64];
@@ -638,9 +667,13 @@ static void serve_config_get(int cfd)
         off += snprintf(json + off, sizeof(json) - off,
             "\"anthropic_auth_token\":\"\",");
     }
+    char e_model[128], e_prompt[2600], e_source[32];
+    json_escape_into(c->anthropic_model, e_model, sizeof(e_model));
+    json_escape_into(c->ai_prompt, e_prompt, sizeof(e_prompt));
+    json_escape_into(c->ai_source, e_source, sizeof(e_source));
     off += snprintf(json + off, sizeof(json) - off,
         "\"anthropic_model\":\"%s\",\"ai_prompt\":\"%s\",\"ai_source\":\"%s\",",
-        c->anthropic_model, c->ai_prompt, c->ai_source);
+        e_model, e_prompt, e_source);
 
     /* alarm */
     off += snprintf(json + off, sizeof(json) - off,
