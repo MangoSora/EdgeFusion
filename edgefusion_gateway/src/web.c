@@ -101,7 +101,8 @@ static void send_http(int cfd, int code, const char *ctype, const char *body, in
                          (code == 400) ? "400 Bad Request" :
                          (code == 403) ? "403 Forbidden" :
                          (code == 404) ? "404 Not Found" :
-                         (code == 405) ? "405 Method Not Allowed" : "500 Internal Server Error";
+                         (code == 405) ? "405 Method Not Allowed" :
+                         (code == 503) ? "503 Service Unavailable" : "500 Internal Server Error";
     char hdr[512];
     int hlen;
     if (ctype) {
@@ -156,11 +157,16 @@ static void serve_static(int cfd, const char *url_path)
     long total = (long)st.st_size;
 
     const char *mime = mime_type(fpath);
+    /* Revalidate application code instead of caching stale JS for an hour. */
+    const char *cache = (!strcmp(mime, "text/html; charset=utf-8") ||
+                         !strcmp(mime, "application/javascript; charset=utf-8") ||
+                         !strcmp(mime, "text/css; charset=utf-8"))
+                        ? "no-cache" : "max-age=3600";
     char hdr[512];
     int hlen = snprintf(hdr, sizeof(hdr),
         "HTTP/1.1 200 OK\r\nContent-Type: %s\r\nContent-Length: %ld\r\n"
-        "Cache-Control: max-age=3600\r\nConnection: close\r\n\r\n",
-        mime, total);
+        "Cache-Control: %s\r\nConnection: close\r\n\r\n",
+        mime, total, cache);
     send(cfd, hdr, hlen, 0);
 
     char buf[32 * 1024];
@@ -788,8 +794,9 @@ static void serve_mqtt_cmd(int cfd, const char *body, int body_len)
         return;
     }
     struct json_object *root = json_tokener_parse(body);
-    if (!root) {
-        const char *e = "{\"ok\":false,\"error\":\"invalid json\"}";
+    if (!root || !json_object_is_type(root, json_type_object)) {
+        if (root) json_object_put(root);
+        const char *e = "{\"ok\":false,\"error\":\"invalid json object\"}";
         send_json(cfd, 400, e, (int)strlen(e));
         return;
     }
@@ -797,35 +804,48 @@ static void serve_mqtt_cmd(int cfd, const char *body, int body_len)
     json_object_object_get_ex(root, "device", &jdev);
     json_object_object_get_ex(root, "cmd", &jcmd);
     json_object_object_get_ex(root, "value", &jval);
-    if (!jcmd) {
+    if (!json_object_is_type(root, json_type_object) ||
+        !json_object_is_type(jcmd, json_type_string) ||
+        !json_object_get_string(jcmd)[0] ||
+        (jdev && (!json_object_is_type(jdev, json_type_string) ||
+                  !json_object_get_string(jdev)[0]))) {
         json_object_put(root);
-        const char *e = "{\"ok\":false,\"error\":\"missing cmd\"}";
+        const char *e = "{\"ok\":false,\"error\":\"cmd and device must be non-empty strings\"}";
         send_json(cfd, 400, e, (int)strlen(e));
         return;
     }
     const char *device = jdev ? json_object_get_string(jdev) : "A1";
-    const char *cmd = json_object_get_string(jcmd);
 
-    char cmd_json[192];
-    if (jval) {
-        /* 用 json-c 的序列化结果拼参数：数字保持数字、字符串保持带引号，
-         * 避免依赖 enum json_type（该枚举未必在当前包含路径下可见） */
-        snprintf(cmd_json, sizeof(cmd_json), "{\"cmd\":\"%s\",\"value\":%s}",
-                 cmd, json_object_to_json_string(jval));
-    } else {
-        snprintf(cmd_json, sizeof(cmd_json), "{\"cmd\":\"%s\"}", cmd);
+    /* Serialize both messages with json-c: escape quotes/backslashes and avoid
+     * truncating JSON in fixed-size snprintf buffers. */
+    struct json_object *command = json_object_new_object();
+    struct json_object *response = json_object_new_object();
+    if (!command || !response) {
+        if (command) json_object_put(command);
+        if (response) json_object_put(response);
+        json_object_put(root);
+        const char *e = "{\"ok\":false,\"error\":\"out of memory\"}";
+        send_json(cfd, 500, e, (int)strlen(e));
+        return;
     }
-
+    json_object_object_add(command, "cmd", json_object_get(jcmd));
+    if (json_object_object_get_ex(root, "value", &jval))
+        json_object_object_add(command, "value", json_object_get(jval));
+    const char *cmd_json = json_object_to_json_string_ext(command, JSON_C_TO_STRING_PLAIN);
     int rc = mqtt_bridge_send_cmd(device, cmd_json);
-    char resp[256];
+
+    json_object_object_add(response, "ok", json_object_new_boolean(rc == 0));
+    json_object_object_add(response, "device", json_object_new_string(device));
     if (rc == 0)
-        snprintf(resp, sizeof(resp), "{\"ok\":true,\"device\":\"%s\",\"sent\":\"%s\"}",
-                 device, cmd_json);
+        json_object_object_add(response, "cmd", json_object_get(jcmd));
     else
-        snprintf(resp, sizeof(resp),
-                 "{\"ok\":false,\"device\":\"%s\",\"error\":\"mqtt not connected\"}", device);
-    json_object_put(root);
+        json_object_object_add(response, "error",
+                               json_object_new_string("mqtt unavailable or command queue full"));
+    const char *resp = json_object_to_json_string_ext(response, JSON_C_TO_STRING_PLAIN);
     send_json(cfd, rc == 0 ? 200 : 503, resp, (int)strlen(resp));
+    json_object_put(response);
+    json_object_put(command);
+    json_object_put(root);
 }
 
 /* ─── /api/config POST ─── */

@@ -55,3 +55,10 @@ test: $(BUILD)/test_recorder $(BUILD)/test_image_scale $(BUILD)/test_pkt_queue $
 	./$(BUILD)/test_mqtt_client
 
 -include $(OBJECTS:.o=.d)
+
+.PHONY: test-web
+$(BUILD)/test_web_mqtt: tests/test_web_mqtt.c src/web.c $(wildcard src/*.h) | check-deps $(BUILD)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -ffunction-sections -fdata-sections $< $(LDFLAGS) -Wl,--gc-sections $(LDLIBS) -o $@
+
+test-web: $(BUILD)/test_web_mqtt
+	./$(BUILD)/test_web_mqtt
