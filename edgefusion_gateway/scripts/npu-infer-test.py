@@ -94,6 +94,28 @@ def decode_yolov5(outputs, conf_thres=0.25, iou_thres=0.45):
     return [(classes[i], scores[i], boxes[i]) for i in np.array(idx).flatten()]
 
 
+
+def decode_yolo11(outputs, conf_thres=0.25, iou_thres=0.45):
+    """YOLO11/YOLOv8：(1,84,N) 无 objectness；前 4 维为 cx,cy,w,h（像素尺度），后 80 为类别分数"""
+    o = outputs[0]
+    o = o[0] if o.ndim == 3 else o                # (84, N)
+    if o.shape[0] < o.shape[1]:
+        o = o.T                                   # (N, 84)
+    boxes, scores, classes = [], [], []
+    cls_scores = o[:, 4:]
+    cid = np.argmax(cls_scores, axis=1)
+    conf = cls_scores[np.arange(len(o)), cid]
+    for i in np.nonzero(conf > conf_thres)[0]:
+        cx, cy, w, h = o[i, 0], o[i, 1], o[i, 2], o[i, 3]
+        boxes.append([float(cx - w / 2), float(cy - h / 2), float(w), float(h)])
+        scores.append(float(conf[i]))
+        classes.append(int(cid[i]))
+    if not boxes:
+        return []
+    idx = cv2.dnn.NMSBoxes(boxes, scores, conf_thres, iou_thres)
+    return [(classes[i], scores[i], boxes[i]) for i in np.array(idx).flatten()]
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--model", required=True)
@@ -122,8 +144,11 @@ def main():
     shapes = [tuple(o.shape) for o in outs]
     print(f"输出张量: {shapes}")
     yolov5_layout = len(outs) == 3 and outs[0].shape[1] == 255
-    if not yolov5_layout:
-        print("提示：输出不是 YOLOv5(255通道) 布局 → 若为 (1,84,N) 需改用 YOLOv8 解码")
+    if yolov5_layout:
+        print("解码器: YOLOv5(255ch, anchor-based)")
+    else:
+        print("解码器: YOLO11/YOLOv8(anchor-free)")
+    decoder = decode_yolov5 if yolov5_layout else decode_yolo11
 
     # ── 延迟测量 ──
     buf = cv2.cvtColor(cv2.imread(files[0]), cv2.COLOR_BGR2RGB)
@@ -148,7 +173,7 @@ def main():
         t0 = time.perf_counter()
         outs = rknn.inference(inputs=[lb[None, ...]])
         dt = (time.perf_counter() - t0) * 1000
-        dets = decode_yolov5(outs) if yolov5_layout else []
+        dets = decoder(outs)
         named = [f"{COCO80[c] if c < len(COCO80) else c}:{s:.2f}" for c, s, _ in dets[:5]]
         total += len(dets)
         print(f"  {os.path.basename(f)}  推理 {dt:.0f} ms  检出 {len(dets)} 个  {' '.join(named)}")
