@@ -2,3 +2,10 @@
 # 个人笔记（工作清单 / 面试准备 / 简历表述）不入库，保留在仓库外的 ~/EdgeFusion-notes/
 /docs/MY_WORK.md
 /docs/INTERVIEW_QA.md
+
+# 本地配置（可能含云端 AI token / MQTT 口令），永不入库
+config/*.local
+config/*.local.conf
+config/local.conf
+**/config/*.local
+**/config/*.local.conf
