@@ -287,6 +287,8 @@ static int               g_q_count;
 static pthread_mutex_t   g_q_mtx = PTHREAD_MUTEX_INITIALIZER;
 static atomic_int        g_accept_device;          /* 由分析线程按 ai_source 设置 */
 static unsigned long long g_q_accepted, g_q_dropped;
+static atomic_int         g_src_local, g_src_device;
+static atomic_int         g_last_call_ms;      /* 最近一次云端调用耗时(ms) */
 
 int cloud_ai_submit_jpeg(const uint8_t *jpeg, int len)
 {
@@ -355,6 +357,8 @@ static void *ai_thread(void *arg)
     int src_local  = strcmp(g_cfg.ai_source, "device") != 0;
     int src_device = strcmp(g_cfg.ai_source, "local")  != 0;
     atomic_store(&g_accept_device, src_device);
+    atomic_store(&g_src_local, src_local);
+    atomic_store(&g_src_device, src_device);
     LOG_INF("cloud_ai 帧来源: %s (local=%d device=%d)", g_cfg.ai_source, src_local, src_device);
 
     while (g_running) {
@@ -373,7 +377,12 @@ static void *ai_thread(void *arg)
         }
         if (!jpeg) { usleep(interval_us); continue; }
 
+        struct timespec t0, t1;
+        clock_gettime(CLOCK_MONOTONIC, &t0);
         process_one_frame(jpeg, sz);
+        clock_gettime(CLOCK_MONOTONIC, &t1);
+        atomic_store(&g_last_call_ms,
+                     (int)((t1.tv_sec - t0.tv_sec) * 1000 + (t1.tv_nsec - t0.tv_nsec) / 1000000));
         free(jpeg);
         /* 调用可能耗时数秒，这里只做上限节流 */
         if (g_running) usleep(interval_us);
@@ -422,6 +431,10 @@ void cloud_ai_reload(const gateway_conf_t *cfg)
     strncpy(g_cfg.anthropic_model, cfg->anthropic_model, sizeof(g_cfg.anthropic_model) - 1);
     g_cfg.anthropic_model[sizeof(g_cfg.anthropic_model) - 1] = 0;
     strncpy(g_cfg.anthropic_base_url, cfg->anthropic_base_url, sizeof(g_cfg.anthropic_base_url) - 1);
+    /* token 也热更新：这样在网页上填完 Key 立即生效（此前只更新 url/模型/prompt）*/
+    strncpy(g_cfg.anthropic_auth_token, cfg->anthropic_auth_token,
+            sizeof(g_cfg.anthropic_auth_token) - 1);
+    g_cfg.anthropic_auth_token[sizeof(g_cfg.anthropic_auth_token) - 1] = 0;
     g_cfg.anthropic_base_url[sizeof(g_cfg.anthropic_base_url) - 1] = 0;
     int now_enabled = g_cfg.ai_enable && (g_cfg.anthropic_auth_token[0] != 0);
     pthread_mutex_unlock(&g_cfg_mtx);
@@ -453,4 +466,22 @@ void cloud_ai_stop(void)
     g_q_count = 0;
     pthread_mutex_unlock(&g_q_mtx);
     LOG_INF("cloud_ai 线程已停止");
+}
+
+/* B3：分析流水线运行指标（供 /api/status 与网页显示） */
+void cloud_ai_get_stats(cloud_ai_stats_t *out)
+{
+    if (!out) return;
+    memset(out, 0, sizeof(*out));
+    pthread_mutex_lock(&g_cfg_mtx);
+    out->configured = g_cfg.ai_enable && (g_cfg.anthropic_auth_token[0] != 0);
+    snprintf(out->source, sizeof(out->source), "%s",
+             atomic_load(&g_src_device) && atomic_load(&g_src_local) ? "both" :
+             atomic_load(&g_src_device) ? "device" :
+             atomic_load(&g_src_local)  ? "local"  : "off");
+    pthread_mutex_unlock(&g_cfg_mtx);
+    out->src_local  = atomic_load(&g_src_local);
+    out->src_device = atomic_load(&g_src_device);
+    out->last_call_ms = atomic_load(&g_last_call_ms);
+    cloud_ai_submit_stats(&out->frames_submitted, &out->frames_dropped);
 }

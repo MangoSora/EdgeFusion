@@ -31,4 +31,16 @@ void cloud_ai_submit_stats(unsigned long long *accepted, unsigned long long *dro
  * ai_enable 翻转时会热启停线程。 */
 void cloud_ai_reload(const gateway_conf_t *cfg);
 
+/* B3：分析流水线运行指标 */
+typedef struct {
+    int                configured;        /* ai_enable 且 token 非空 */
+    int                src_local;         /* 当前来源含网关摄像头 */
+    int                src_device;        /* 当前来源含端侧上报快照 */
+    int                last_call_ms;      /* 最近一次云端调用耗时(ms) */
+    unsigned long long frames_submitted;  /* 投递给分析的帧数 */
+    unsigned long long frames_dropped;    /* 队列满丢弃的帧数 */
+    char               source[16];        /* local|device|both|off */
+} cloud_ai_stats_t;
+void cloud_ai_get_stats(cloud_ai_stats_t *out);
+
 #endif

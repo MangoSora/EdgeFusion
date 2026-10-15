@@ -568,6 +568,11 @@ function buildSettingsForm(c) {
           <div class="form-grid">
             ${sw('ai_enable', c.ai_enable, '启用云端 AI', '已启用', '已禁用')}
             <div class="form-group"><label>AI 帧率 (fps)</label><input type="number" name="ai_fps" value="${c.ai_fps}"></div>
+            <div class="form-group"><label>分析帧来源</label><select name="ai_source">
+              <option value="local" ${c.ai_source === 'local' ? 'selected' : ''}>网关摄像头 (local)</option>
+              <option value="device" ${c.ai_source === 'device' ? 'selected' : ''}>端侧上报快照 (device)</option>
+              <option value="both" ${c.ai_source === 'both' ? 'selected' : ''}>两者都分析 (both)</option>
+            </select></div>
             <div class="form-group"><label>缩放宽度 (px)</label><input type="number" name="ai_frame_width" value="${c.ai_frame_width}"></div>
             <div class="form-group"><label>JPEG 质量</label><input type="number" name="ai_jpeg_quality" value="${c.ai_jpeg_quality}"></div>
             <div class="form-group"><label>HTTP 超时 (秒)</label><input type="number" name="ai_http_timeout_s" value="${c.ai_http_timeout_s}"></div>
@@ -652,7 +657,7 @@ async function saveConfig(e) {
   const fd = new FormData($('#cfg-form'));
   const obj = {};
   const strKeys = ['rtsp_url','rtsp_sub_url','rtsp_transport','storage_dir','segment_prefix',
-    'anthropic_base_url','anthropic_auth_token','anthropic_model','ai_prompt',
+    'anthropic_base_url','anthropic_auth_token','anthropic_model','ai_prompt','ai_source',
     'alarm_trigger_types','web_bind','web_root','mqtt_host','mqtt_client_id','mqtt_topic',
     'mqtt_user','mqtt_pass','log_level','log_file'];
   fd.forEach((v, k) => {
@@ -750,7 +755,8 @@ async function refreshDevice() {
       mqRow('收到消息', m.rx || 0) +
       mqRow('下发命令', m.tx || 0) +
       mqRow('端侧事件入库', m.events_stored || 0) +
-      mqRow('端侧快照存盘', m.snapshots_saved || 0);
+      mqRow('端侧快照存盘', m.snapshots_saved || 0) +
+      mqRow('送 AI 分析', (m.frames_to_ai || 0) + ' 帧');
     const img = $('#mq-snap');
     if (img) img.src = '/api/mqtt/snapshot?ts=' + Date.now();
     const live = $('#mq-live');

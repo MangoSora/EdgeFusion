@@ -301,10 +301,16 @@ static void serve_status(int cfd)
     off += snprintf(json + off, sizeof(json) - off,
         ",\"cloud_ai\":{");
     if (have_ai) {
+        cloud_ai_stats_t ai_stats;
+        cloud_ai_get_stats(&ai_stats);
         off += snprintf(json + off, sizeof(json) - off,
-            "\"enabled\":%s,\"running\":%s",
+            "\"enabled\":%s,\"running\":%s,\"configured\":%s,\"source\":\"%s\","
+            "\"frames_submitted\":%llu,\"frames_dropped\":%llu,\"last_call_ms\":%d",
             ai.enabled ? "true" : "false",
-            ai.running ? "true" : "false");
+            ai.running ? "true" : "false",
+            ai_stats.configured ? "true" : "false",
+            ai_stats.source, ai_stats.frames_submitted, ai_stats.frames_dropped,
+            ai_stats.last_call_ms);
     } else {
         off += snprintf(json + off, sizeof(json) - off,
             "\"enabled\":false,\"running\":false");
@@ -633,8 +639,8 @@ static void serve_config_get(int cfd)
             "\"anthropic_auth_token\":\"\",");
     }
     off += snprintf(json + off, sizeof(json) - off,
-        "\"anthropic_model\":\"%s\",\"ai_prompt\":\"%s\",",
-        c->anthropic_model, c->ai_prompt);
+        "\"anthropic_model\":\"%s\",\"ai_prompt\":\"%s\",\"ai_source\":\"%s\",",
+        c->anthropic_model, c->ai_prompt, c->ai_source);
 
     /* alarm */
     off += snprintf(json + off, sizeof(json) - off,
@@ -899,6 +905,8 @@ static void serve_config_post(int cfd, const char *body, int body_len)
         strncpy(new_cfg.anthropic_model, buf, sizeof(new_cfg.anthropic_model) - 1);
     if (json_get_str(js, "ai_prompt", buf, sizeof(buf)) == 0)
         strncpy(new_cfg.ai_prompt, buf, sizeof(new_cfg.ai_prompt) - 1);
+    if (json_get_str(js, "ai_source", buf, sizeof(buf)) == 0)
+        strncpy(new_cfg.ai_source, buf, sizeof(new_cfg.ai_source) - 1);
     if (json_get_int(js, "alarm_gpio_led", &iv) == 0) new_cfg.alarm_gpio_led = iv;
     if (json_get_int(js, "alarm_gpio_buzzer", &iv) == 0) new_cfg.alarm_gpio_buzzer = iv;
     if (json_get_str(js, "alarm_trigger_types", buf, sizeof(buf)) == 0)
