@@ -4,3 +4,10 @@
 /edgefusion_gateway/README.md
 /edgefusion_gateway/docs/
 /edgefusion_vision/README.md
+
+# 本地配置（可能含云端 AI token / MQTT 口令），永不入库
+config/*.local
+config/*.local.conf
+config/local.conf
+**/config/*.local
+**/config/*.local.conf
