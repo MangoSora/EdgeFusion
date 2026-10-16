@@ -9,3 +9,5 @@ config/*.local.conf
 config/local.conf
 **/config/*.local
 **/config/*.local.conf
+/docs/INTERVIEW_CHEATSHEET.md
+/docs/RESUME.md
