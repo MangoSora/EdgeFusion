@@ -379,6 +379,29 @@ function playRecording(name) {
    Page: Events
    ───────────────────────────────────────────────────────── */
 let evPage = 0, evType = '', evLimit = 20;
+let evRequest = 0;
+
+function eventThumb(ev) {
+  if (!ev.snapshot) return '<div class="event-thumb-ph">无快照</div>';
+  if (ev.snapshot_state === 'missing')
+    return '<div class="event-thumb-ph">快照已清理或丢失</div>';
+  return `<img class="event-thumb" src="/snap/${encodeURIComponent(ev.snapshot)}"
+    alt="事件快照" loading="lazy" onerror="eventThumbError(this)">`;
+}
+
+function eventThumbError(img) {
+  if (!img.isConnected) return;
+  const button = document.createElement('button');
+  button.className = 'event-thumb-ph';
+  button.type = 'button';
+  button.textContent = '图片加载失败，点击重试';
+  button.onclick = () => {
+    img.src = img.src.split('?')[0] + '?retry=' + Date.now();
+    button.replaceWith(img);
+  };
+  img.replaceWith(button);
+}
+
 async function renderEvents() {
   onStatusUpdate = null;
   $('#content').innerHTML = `
@@ -412,26 +435,31 @@ async function renderEvents() {
 async function loadEvents() {
   const type = $('#ev-type-filter')?.value || '';
   evType = type;
-  const offset = evPage * evLimit;
+  const page = evPage;
+  const offset = page * evLimit;
+  const request = ++evRequest;
   const list = $('#ev-list');
+  if (!list) return;
+  const current = () => request === evRequest && $('#ev-list') === list;
   list.innerHTML = '<div class="empty-state"><span class="spin"></span> 加载中…</div>';
   try {
     let url = `/api/events?limit=${evLimit}&offset=${offset}`;
     if (type) url += '&type=' + encodeURIComponent(type);
     const r = await fetch(url);
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
     const a = await r.json();
+    if (!current()) return;
+    if (!Array.isArray(a)) throw new Error('Invalid event list');
     if (!a.length) {
-      list.innerHTML = `<div class="empty-state"><div class="es-icon">🔔</div><div class="es-msg">${evPage === 0 ? '暂无事件记录' : '没有更多事件'}</div></div>`;
-      $('#ev-pager').innerHTML = evPage > 0 ? prevBtn() : '';
+      list.innerHTML = `<div class="empty-state"><div class="es-icon">🔔</div><div class="es-msg">${page === 0 ? '暂无事件记录' : '没有更多事件'}</div></div>`;
+      $('#ev-pager').innerHTML = page > 0 ? prevBtn() : '';
       return;
     }
     list.innerHTML = a.map(ev => {
       const conf = Math.round((ev.confidence || 0) * 100);
       return `
         <div class="event-card ${ev.event_type}">
-          ${ev.snapshot
-            ? `<img class="event-thumb" src="/snap/${encodeURIComponent(ev.snapshot)}" alt="snapshot" loading="lazy" onerror="this.outerHTML='<div class=\\'event-thumb-ph\\'>无图</div>'">`
-            : `<div class="event-thumb-ph">无快照</div>`}
+          ${eventThumb(ev)}
           <div class="event-body">
             <div class="event-head">
               <span class="ev-badge ${ev.event_type}">${ev.event_type}</span>
@@ -444,11 +472,12 @@ async function loadEvents() {
         </div>`;
     }).join('');
     $('#ev-pager').innerHTML = `
-      ${evPage > 0 ? `<button class="btn btn-sm" onclick="evPage--;loadEvents()">← 上一页</button>` : ''}
-      <span class="pg-info">第 ${evPage + 1} 页</span>
+      ${page > 0 ? `<button class="btn btn-sm" onclick="evPage--;loadEvents()">← 上一页</button>` : ''}
+      <span class="pg-info">第 ${page + 1} 页</span>
       <button class="btn btn-sm" ${a.length < evLimit ? 'disabled' : ''} onclick="evPage++;loadEvents()">下一页 →</button>
     `;
   } catch(e) {
+    if (!current()) return;
     list.innerHTML = '<div class="empty-state"><div class="es-icon">⚠</div><div class="es-msg">事件列表加载失败</div></div>';
   }
 }

@@ -62,3 +62,10 @@ $(BUILD)/test_web_mqtt: tests/test_web_mqtt.c src/web.c $(wildcard src/*.h) | ch
 
 test-web: $(BUILD)/test_web_mqtt
 	./$(BUILD)/test_web_mqtt
+
+.PHONY: test-events
+$(BUILD)/test_event_snapshots: tests/test_event_snapshots.c src/event_bus.c src/web.c src/log.c $(wildcard src/*.h) | check-deps $(BUILD)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -ffunction-sections -fdata-sections $< src/log.c $(LDFLAGS) -Wl,--gc-sections $(LDLIBS) -o $@
+
+test-events: $(BUILD)/test_event_snapshots
+	./$(BUILD)/test_event_snapshots

@@ -492,6 +492,15 @@ static void serve_file(int cfd, const char *name, const char *range_hdr)
     close(fd);
 }
 
+/* A DB path can outlive the file after storage reclamation. */
+static const char *snapshot_state(const event_t *ev)
+{
+    if (!ev->jpeg_path[0]) return "none";
+    struct stat st;
+    return stat(ev->jpeg_path, &st) == 0 && S_ISREG(st.st_mode) && st.st_size > 0
+        ? "available" : "missing";
+}
+
 /* ─── /api/events ─── */
 static void serve_events(int cfd, const char *query)
 {
@@ -534,7 +543,7 @@ static void serve_events(int cfd, const char *query)
             snprintf(snapname, sizeof(snapname), "%s", base ? base + 1 : evs[i].jpeg_path);
             snap = snapname;
         }
-        int need = 512;
+        int need = 2048;
         while ((int)cap - off < need) {
             cap *= 2;
             char *nb = realloc(json, cap);
@@ -543,11 +552,11 @@ static void serve_events(int cfd, const char *query)
         }
         off += snprintf(json + off, cap - off,
             "%s{\"id\":%ld,\"ts\":%lld,\"event_type\":\"%s\",\"confidence\":%.2f,"
-            "\"description\":\"%s\",\"suggested_action\":\"%s\",\"snapshot\":\"%s\"}",
+            "\"description\":\"%s\",\"suggested_action\":\"%s\",\"snapshot\":\"%s\",\"snapshot_state\":\"%s\"}",
             i ? "," : "",
             evs[i].id, (long long)evs[i].created_at,
             evs[i].event_type, evs[i].confidence,
-            esc_desc, evs[i].suggested_action, snap);
+            esc_desc, evs[i].suggested_action, snap, snapshot_state(&evs[i]));
     }
     off += snprintf(json + off, cap - off, "]");
     send_json(cfd, 200, json, off);
@@ -569,9 +578,9 @@ static void serve_event_detail(int cfd, long id)
     char json[1024];
     int off = snprintf(json, sizeof(json),
         "{\"id\":%ld,\"ts\":%lld,\"event_type\":\"%s\",\"confidence\":%.2f,"
-        "\"description\":\"%s\",\"suggested_action\":\"%s\",\"snapshot\":\"%s\"}",
+        "\"description\":\"%s\",\"suggested_action\":\"%s\",\"snapshot\":\"%s\",\"snapshot_state\":\"%s\"}",
         ev.id, (long long)ev.created_at, ev.event_type, ev.confidence,
-        esc_desc, ev.suggested_action, ev.jpeg_path[0] ? (base ? base + 1 : ev.jpeg_path) : "");
+        esc_desc, ev.suggested_action, ev.jpeg_path[0] ? (base ? base + 1 : ev.jpeg_path) : "", snapshot_state(&ev));
     send_json(cfd, 200, json, off);
 }
 

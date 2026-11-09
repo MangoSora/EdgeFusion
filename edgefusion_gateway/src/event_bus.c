@@ -33,6 +33,26 @@ void event_bus_subscribe(event_cb_t cb, void *user)
     pthread_mutex_unlock(&g_lock);
 }
 
+/* Protect recent evidence when recording storage crosses the free-space reserve. */
+#define SNAPSHOT_KEEP_RECENT 200
+static long snapshot_id(const char *name)
+{
+    long id = -1;
+    int end = 0;
+    if (sscanf(name, "evt_%ld.jpg%n", &id, &end) != 1 ||
+        !end || name[end] != 0 || id <= 0) return -1;
+    return id;
+}
+static int snapshot_filter(const struct dirent *e)
+{
+    return snapshot_id(e->d_name) > 0;
+}
+static int snapshot_compare(const struct dirent **a, const struct dirent **b)
+{
+    long x = snapshot_id((*a)->d_name), y = snapshot_id((*b)->d_name);
+    return (x > y) - (x < y);
+}
+
 /* 删最旧 evt_*.jpg 直到剩余空间足够。复用 recorder cleanup_disk 套路 */
 static void cleanup_snapshots(void)
 {
@@ -42,11 +62,11 @@ static void cleanup_snapshots(void)
     unsigned long free_mb = (vfs.f_bavail * (unsigned long)vfs.f_frsize) / (1024 * 1024);
     if ((long)free_mb >= g_min_free_mb) return;
 
-    LOG_WRN("快照盘剩余 %luMB < %ldMB，清理最旧快照", free_mb, g_min_free_mb);
+    LOG_WRN("快照盘剩余 %luMB < %ldMB，仅清理旧快照，保护最近200张", free_mb, g_min_free_mb);
     struct dirent **namelist = NULL;
-    int n = scandir(g_snap_dir, &namelist, NULL, alphasort);
+    int n = scandir(g_snap_dir, &namelist, snapshot_filter, snapshot_compare);
     if (n < 0) return;
-    for (int i = 0; i < n; i++) {
+    for (int i = 0; i < n - SNAPSHOT_KEEP_RECENT; i++) {
         const char *name = namelist[i]->d_name;
         if (name[0] == '.') { continue; }
         size_t l = strlen(name);
