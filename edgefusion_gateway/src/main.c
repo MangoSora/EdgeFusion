@@ -168,7 +168,16 @@ int main(int argc, char *argv[])
     print_access_urls(&cfg);
 
     LOG_INF("进入主循环，等待信号退出...");
+    unsigned cleanup_ticks = 0;
     while (g_running) {
+        if (cleanup_ticks == 0) {
+            stream_status_t status = {0};
+            stream_receiver_get_status(&status);
+            recorder_cleanup_expired(cfg.storage_dir, cfg.segment_prefix,
+                                     cfg.storage_retention_days,
+                                     status.cur_segment, time(NULL));
+        }
+        cleanup_ticks = (cleanup_ticks + 1) % 60;
         sleep(1);
     }
 

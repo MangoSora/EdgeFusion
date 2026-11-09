@@ -28,6 +28,7 @@ typedef struct {
     char  storage_dir[256];
     int   segment_seconds;
     long  storage_min_free_mb;
+    int   storage_retention_days; /* Rolling retention, default 3; restart to apply. */
     char  segment_prefix[32];
 
     /* SQLite */

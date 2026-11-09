@@ -69,3 +69,12 @@ $(BUILD)/test_event_snapshots: tests/test_event_snapshots.c src/event_bus.c src/
 
 test-events: $(BUILD)/test_event_snapshots
 	./$(BUILD)/test_event_snapshots
+
+.PHONY: test-retention
+$(BUILD)/test_recording_retention: tests/test_recording_retention.c src/recorder.c src/conf.c src/log.c $(wildcard src/*.h) | check-deps $(BUILD)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -ffunction-sections -fdata-sections $< src/recorder.c src/conf.c src/log.c $(LDFLAGS) -Wl,--gc-sections $(LDLIBS) -o $@
+
+test-retention: $(BUILD)/test_recording_retention
+	./$(BUILD)/test_recording_retention
+
+test: test-retention

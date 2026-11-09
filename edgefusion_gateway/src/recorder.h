@@ -2,6 +2,7 @@
 #define EDGEFUSION_RECORDER_H
 
 #include <stdint.h>
+#include <time.h>
 #include "libavcodec/avcodec.h"
 #include "libavformat/avformat.h"
 
@@ -36,5 +37,10 @@ int  recorder_get_status(const recorder_t *r, recorder_status_t *st);
 
 /* 热重载分段时长（下一段生效） */
 void recorder_set_segment_seconds(recorder_t *r, int seconds);
+
+/* Remove completed, regular recording files older than days*24h.
+ * active_name is a basename; now is explicit for deterministic tests. */
+int recorder_cleanup_expired(const char *dir, const char *prefix, int days,
+                             const char *active_name, time_t now);
 
 #endif

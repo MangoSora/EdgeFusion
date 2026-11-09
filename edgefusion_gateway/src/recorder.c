@@ -3,6 +3,7 @@
 
 #include <dirent.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -275,4 +276,50 @@ int recorder_write_packet(recorder_t *r, AVPacket *pkt, int is_key, AVRational s
         LOG_WRN("写帧失败 ret=%d", ret);
     }
     return ret < 0 ? -1 : 0;
+}
+
+/* Age cleanup runs from the main loop, independently of camera connectivity.
+ * mtime is the last write time: retain segments overlapping the cutoff.
+ * dirfd operations never follow symlinks or descend into child directories. */
+int recorder_cleanup_expired(const char *dir, const char *prefix, int days,
+                             const char *active_name, time_t now)
+{
+    if (!dir || !prefix || !prefix[0] || days < 1 || days > 3650) return 0;
+    const int64_t cutoff = (int64_t)now - (int64_t)days * 86400;
+    if (cutoff <= 0) return 0;
+    DIR *dp = opendir(dir);
+    if (!dp) return 0;
+    size_t plen = strlen(prefix);
+    int removed = 0;
+    struct dirent *entry;
+    while ((entry = readdir(dp))) {
+        const char *name = entry->d_name;
+        size_t len = strlen(name);
+        if (len <= plen + 21 || strncmp(name, prefix, plen) ||
+            name[plen] != '_' || strcmp(name + len - 4, ".mp4")) continue;
+        const char *stamp = name + plen + 1;
+        /* YYYYMMDD_HHMMSS_sequence (with optional nanosecond component). */
+        int valid = stamp[8] == '_' && stamp[15] == '_';
+        for (size_t i = 0; i < len - plen - 5 && valid; ++i) {
+            if (i == 8 || i == 15) continue;
+            if (stamp[i] < '0' || stamp[i] > '9') {
+                if (!(i > 15 && stamp[i] == '_' &&
+                      stamp[i-1] >= '0' && stamp[i-1] <= '9' &&
+                      stamp[i+1] >= '0' && stamp[i+1] <= '9')) valid = 0;
+            }
+        }
+        if (!valid || (active_name && !strcmp(name, active_name))) continue;
+        struct stat st;
+        if (fstatat(dirfd(dp), name, &st, AT_SYMLINK_NOFOLLOW) != 0 ||
+            !S_ISREG(st.st_mode) || (int64_t)st.st_mtime >= cutoff) continue;
+        if (unlinkat(dirfd(dp), name, 0) == 0) {
+            ++removed;
+            LOG_INF("删除超过%d天的录像: %s", days, name);
+        } else if (errno != ENOENT) {
+            LOG_WRN("过期录像删除失败: %s (%s)", name, strerror(errno));
+        }
+    }
+    closedir(dp);
+    if (removed) LOG_INF("录像保留策略: %d天，已删除%d个过期片段", days, removed);
+    return removed;
 }

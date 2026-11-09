@@ -7,6 +7,7 @@
 #include "stream_receiver.h"
 
 #include <ctype.h>
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -62,6 +63,7 @@ int conf_load(gateway_conf_t *cfg, const char *path)
     cfg->rtsp_server_port = 8554;
     cfg->segment_seconds  = 600;
     cfg->storage_min_free_mb = 500;
+    cfg->storage_retention_days = 3;
     strcpy(cfg->segment_prefix, "rec");
     cfg->ai_fps = 1;
     cfg->ai_enable = 1;   /* 默认启用云端 AI（仍需 token 非空才真正上云） */
@@ -121,6 +123,17 @@ int conf_load(gateway_conf_t *cfg, const char *path)
         else if (!strcmp(key, "rtsp_server_enable"))  cfg->rtsp_server_enable = atoi(val);
         else if (!strcmp(key, "rtsp_server_port"))    cfg->rtsp_server_port = atoi(val);
         else if (!strcmp(key, "storage_dir"))         set_str(cfg->storage_dir, sizeof(cfg->storage_dir), val);
+        else if (!strcmp(key, "storage_retention_days")) {
+            char *end;
+            errno = 0;
+            long days = strtol(val, &end, 10);
+            if (errno || end == val || *end || days < 1 || days > 3650) {
+                LOG_ERR("storage_retention_days must be an integer between 1 and 3650");
+                fclose(fp);
+                return -1;
+            }
+            cfg->storage_retention_days = (int)days;
+        }
         else if (!strcmp(key, "segment_seconds"))     cfg->segment_seconds = atoi(val);
         else if (!strcmp(key, "storage_min_free_mb")) cfg->storage_min_free_mb = strtol(val, NULL, 10);
         else if (!strcmp(key, "segment_prefix"))      set_str(cfg->segment_prefix, sizeof(cfg->segment_prefix), val);
@@ -207,6 +220,7 @@ void conf_dump(const gateway_conf_t *cfg)
     LOG_INF("RTSP 预览转发 : %s (端口 %d)", cfg->rtsp_server_enable ? "开" : "关", cfg->rtsp_server_port);
     LOG_INF("录像目录      : %s", cfg->storage_dir);
     LOG_INF("单段时长      : %d 秒", cfg->segment_seconds);
+    LOG_INF("录像保留      : %d 天（每60秒检查）", cfg->storage_retention_days);
     LOG_INF("SQLite        : %s", cfg->sqlite_db_path);
     LOG_INF("AI 帧率       : %d fps, 缩放宽 %dpx, 启用=%s", cfg->ai_fps, cfg->ai_frame_width, cfg->ai_enable ? "是" : "否");
     LOG_INF("AI 帧来源    : %s (local|device|both)", cfg->ai_source);
@@ -240,6 +254,7 @@ static int format_value(const gateway_conf_t *cfg, const char *key, char *out, s
     else if (!strcmp(key, "rtsp_server_enable"))  { snprintf(out, cap, "%d", cfg->rtsp_server_enable); return 1; }
     else if (!strcmp(key, "rtsp_server_port"))    { snprintf(out, cap, "%d", cfg->rtsp_server_port); return 1; }
     else if (!strcmp(key, "storage_dir"))         { snprintf(out, cap, "%s", cfg->storage_dir); return 1; }
+    else if (!strcmp(key, "storage_retention_days")) { snprintf(out, cap, "%d", cfg->storage_retention_days); return 1; }
     else if (!strcmp(key, "segment_seconds"))     { snprintf(out, cap, "%d", cfg->segment_seconds); return 1; }
     else if (!strcmp(key, "storage_min_free_mb")) { snprintf(out, cap, "%ld", cfg->storage_min_free_mb); return 1; }
     else if (!strcmp(key, "segment_prefix"))      { snprintf(out, cap, "%s", cfg->segment_prefix); return 1; }

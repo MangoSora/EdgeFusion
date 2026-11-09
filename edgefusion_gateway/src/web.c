@@ -648,8 +648,8 @@ static void serve_config_get(int cfd)
     json_escape_into(c->segment_prefix, e_prefix, sizeof(e_prefix));
     off += snprintf(json + off, sizeof(json) - off,
         "\"storage_dir\":\"%s\",\"segment_seconds\":%d,\"storage_min_free_mb\":%ld,"
-        "\"segment_prefix\":\"%s\",",
-        e_storage, c->segment_seconds, c->storage_min_free_mb, e_prefix);
+        "\"segment_prefix\":\"%s\",\"storage_retention_days\":%d,",
+        e_storage, c->segment_seconds, c->storage_min_free_mb, e_prefix, c->storage_retention_days);
 
     /* AI (mask token) */
     char e_base[512];
